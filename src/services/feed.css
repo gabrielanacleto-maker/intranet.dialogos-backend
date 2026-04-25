@@ -1,0 +1,41 @@
+.composer-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.composer-input {
+  width: 100%;
+  min-height: 42px;
+  resize: none;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+}
+.composer-body {
+  margin-left: 48px; /* alinhado com avatar */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.emoji-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 20px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+}
