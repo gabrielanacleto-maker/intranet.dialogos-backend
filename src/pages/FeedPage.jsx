@@ -221,6 +221,17 @@ export default function FeedPage({ feedType = 'feed' }) {
 
   useEffect(() => { loadPosts(); }, [feedType]);
 
+  // 🔄 RECARREGAR POSTS A CADA 30 SEGUNDOS
+useEffect(() => {
+  if (feedType !== 'feed') return;
+  
+  const interval = setInterval(() => {
+    loadPosts();
+  }, 30000);
+  
+  return () => clearInterval(interval);
+}, [feedType]);
+  
   async function loadPosts() {
     try {
       const data = await api.getPosts(feedType);
