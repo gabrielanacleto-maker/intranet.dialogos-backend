@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { api } from '../services/api';
 import { AV_COLORS, timeAgo, buildEmbedHtml } from '../utils';
+import MoodWidget from '../components/MoodWidget';
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -313,6 +314,7 @@ export default function FeedPage({ feedType = 'feed' }) {
   return (
     <div>
       {feedType === 'feed' && <MuralCarousel />}
+      {feedType === 'feed' && <MoodWidget />}
 
       {canPost && (
         <div className="composer">
