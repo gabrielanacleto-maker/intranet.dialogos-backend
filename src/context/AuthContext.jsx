@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { api } from '../services/api';
 
 const AuthContext = createContext(null);
@@ -38,6 +38,38 @@ export function AuthProvider({ children }) {
       setAllUsers(map);
     } catch (_) {}
   }, []);
+
+  // Logout por inatividade (1 hora sem atividade)
+  useEffect(() => {
+    if (!user) return;
+
+    let inactivityTimer;
+
+    const resetTimer = () => {
+      clearTimeout(inactivityTimer);
+      
+      inactivityTimer = setTimeout(() => {
+        console.log('⏰ Logout por inatividade após 1 hora');
+        logout();
+        alert('Sua sessão expirou por inatividade. Faça login novamente.');
+      }, 3600000); // 1 hora em milissegundos
+    };
+
+    window.addEventListener('mousedown', resetTimer);
+    window.addEventListener('keydown', resetTimer);
+    window.addEventListener('scroll', resetTimer);
+    window.addEventListener('touchstart', resetTimer);
+
+    resetTimer();
+
+    return () => {
+      clearTimeout(inactivityTimer);
+      window.removeEventListener('mousedown', resetTimer);
+      window.removeEventListener('keydown', resetTimer);
+      window.removeEventListener('scroll', resetTimer);
+      window.removeEventListener('touchstart', resetTimer);
+    };
+  }, [user, logout]);
 
   const canPostNovidades = user && (
     user.is_admin || user.is_admin_user || user.is_rh ||
