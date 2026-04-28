@@ -23,13 +23,8 @@ export default function MoodWidget() {
   const [selected, setSelected] = useState(null);
   const [intensity, setIntensity] = useState(null);
   const [reason, setReason] = useState('');
-  const [sent, setSent] = useState(false);
   const [sending, setSending] = useState(false);
 
-  useEffect(() => {
-    const saved = localStorage.getItem(`mood_today_${user?.key}`);
-    if (saved === new Date().toDateString()) setSent(true);
-  }, [user?.key]);
 
   async function handleConfirm() {
     if (!selected || !intensity) return;
@@ -44,23 +39,22 @@ export default function MoodWidget() {
         },
         body: JSON.stringify({ mood: selected.key, intensity, reason: reason.trim() }),
       });
-      localStorage.setItem(`mood_today_${user?.key}`, new Date().toDateString());
-      setSent(true);
+
+      setSelected(null);
+setIntensity(null);
+setReason('');
+
     } catch (err) {
       console.warn('Erro ao salvar humor:', err);
-      setSent(true);
+      setSelected(null);
+setIntensity(null);
+setReason('');
+
     } finally {
       setSending(false);
     }
   }
 
-  if (sent) {
-    return (
-      <div style={{ padding: '12px 0 4px', fontSize: 13, color: 'var(--gold)', fontWeight: 600 }}>
-        {selected ? `${selected.emoji} Humor registrado! Obrigado 💛` : '✅ Humor já registrado hoje!'}
-      </div>
-    );
-  }
 
   return (
     <div>
