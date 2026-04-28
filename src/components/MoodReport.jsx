@@ -27,12 +27,8 @@ export default function MoodReport() {
 
   const { user } = useAuth();
 
-  const canReset =
-    user?.is_admin ||
-    user?.is_admin_user ||
-    user?.is_rh ||
-    user?.level === "lider" ||
-    user?.level === "direcao";
+  const canReset = true;
+
 
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
