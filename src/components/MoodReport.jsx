@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react';
 
+import { useAuth } from '../context/AuthContext'; // <-- se já não tiver
+
+
 const MOODS = [
   { key: 'feliz',          label: 'Feliz',           emoji: '😊', color: '#22c55e' },
   { key: 'motivado',       label: 'Motivado',         emoji: '💪', color: '#f59e0b' },
@@ -21,6 +24,16 @@ function getMonthLabel(dateStr) {
 }
 
 export default function MoodReport() {
+
+  const { user } = useAuth();
+
+  const canReset =
+    user?.is_admin ||
+    user?.is_admin_user ||
+    user?.is_rh ||
+    user?.level === "lider" ||
+    user?.level === "direcao";
+
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedMonth, setSelectedMonth] = useState('');
@@ -100,12 +113,33 @@ export default function MoodReport() {
     a.click();
     URL.revokeObjectURL(url);
   }
+async function handleReset() {
+  const confirm = window.confirm("Tem certeza que deseja resetar SEUS dados?");
+  if (!confirm) return;
 
-  if (loading) return (
-    <div className="surface-card" style={{ padding: 20, marginTop: 20 }}>
-      <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>⏳ Carregando relatório...</div>
-    </div>
-  );
+  try {
+    const token = localStorage.getItem('dialogos_token');
+
+    await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/mood/reset`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        user_id: user.id
+      }),
+    });
+
+    alert('Seus dados foram resetados');
+    window.location.reload();
+
+  } catch (err) {
+    console.error(err);
+    alert('Erro ao resetar');
+  }
+}
+
 
   return (
     <div className="surface-card" style={{ padding: 20, marginTop: 20 }}>
@@ -114,14 +148,37 @@ export default function MoodReport() {
           📊 Relatório de Humor
         </div>
         {total > 0 && (
-          <button onClick={downloadReport} style={{
-            padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-            background: 'transparent', border: '1.5px solid var(--gold)',
-            color: 'var(--gold)', cursor: 'pointer',
-          }}>
-            ⬇️ Baixar
-          </button>
-        )}
+  <div style={{ display: 'flex', gap: 8 }}>
+    
+    <button onClick={downloadReport} style={{
+      padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+      background: 'transparent', border: '1.5px solid var(--gold)',
+      color: 'var(--gold)', cursor: 'pointer',
+    }}>
+      ⬇️ Baixar
+    </button>
+
+    {canReset && (
+      <button
+        onClick={handleReset}
+        style={{
+          padding: '6px 14px',
+          borderRadius: 8,
+          fontSize: 12,
+          fontWeight: 600,
+          background: '#ff4d4f',
+          color: '#fff',
+          border: 'none',
+          cursor: 'pointer'
+        }}
+      >
+        🗑️ Resetar
+      </button>
+    )}
+
+  </div>
+)}
+
       </div>
       <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
         Acompanhe como você tem se sentido ao longo do mês.
