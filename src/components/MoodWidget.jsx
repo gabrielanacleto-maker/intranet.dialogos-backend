@@ -22,6 +22,7 @@ export default function MoodWidget() {
   const { user } = useAuth();
   const [selected, setSelected] = useState(null);
   const [intensity, setIntensity] = useState(null);
+  const [reason, setReason] = useState('');
   const [sent, setSent] = useState(false);
   const [sending, setSending] = useState(false);
 
@@ -41,7 +42,7 @@ export default function MoodWidget() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ mood: selected.key, intensity, reason: '' }),
+        body: JSON.stringify({ mood: selected.key, intensity, reason: reason.trim() }),
       });
       localStorage.setItem(`mood_today_${user?.key}`, new Date().toDateString());
       setSent(true);
@@ -67,7 +68,7 @@ export default function MoodWidget() {
         {MOODS.map(mood => (
           <button
             key={mood.key}
-            onClick={() => { setSelected(mood); setIntensity(null); }}
+            onClick={() => { setSelected(mood); setIntensity(null); setReason(''); }}
             style={{
               display: 'flex', flexDirection: 'column', alignItems: 'center',
               gap: 4, padding: '8px 10px', borderRadius: 12,
@@ -83,11 +84,12 @@ export default function MoodWidget() {
       </div>
 
       {selected && (
-        <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, background: 'rgba(201,168,76,0.06)', border: '1px solid rgba(201,168,76,0.2)' }}>
+        <div style={{ marginTop: 12, padding: '14px 16px', borderRadius: 12, background: 'rgba(201,168,76,0.06)', border: '1px solid rgba(201,168,76,0.2)' }}>
+          {/* Intensidade */}
           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
             {selected.emoji} Qual a intensidade?
           </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
             {INTENSITIES.map(i => (
               <button
                 key={i.value}
@@ -104,6 +106,27 @@ export default function MoodWidget() {
               </button>
             ))}
           </div>
+
+          {/* Motivo */}
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            📝 Descreva o motivo <span style={{ fontWeight: 400, textTransform: 'none' }}>(opcional)</span>
+          </div>
+          <textarea
+            value={reason}
+            onChange={e => setReason(e.target.value.slice(0, 6000))}
+            placeholder="Como você está se sentindo? O que aconteceu?"
+            rows={3}
+            style={{
+              width: '100%', padding: '10px 12px', borderRadius: 8,
+              border: '1.5px solid var(--border)', background: 'var(--bg)',
+              color: 'var(--text)', fontFamily: 'inherit', fontSize: 13,
+              resize: 'vertical', boxSizing: 'border-box', marginBottom: 4,
+            }}
+          />
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'right', marginBottom: 12 }}>
+            {reason.length}/6000
+          </div>
+
           <button
             onClick={handleConfirm}
             disabled={!intensity || sending}
