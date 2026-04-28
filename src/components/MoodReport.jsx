@@ -25,16 +25,19 @@ export default function MoodReport() {
   const [selectedMonth, setSelectedMonth] = useState('');
 
   useEffect(() => {
-    api.get('/api/mood/history')
-      .then(data => {
-        setHistory(Array.isArray(data) ? data : []);
-        // Seleciona mês atual por padrão
-        const now = new Date();
-        setSelectedMonth(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`);
-      })
-      .catch(() => setHistory([]))
-      .finally(() => setLoading(false));
-  }, []);
+  const token = localStorage.getItem('dialogos_token');
+  fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/mood/history`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+    .then(r => r.json())
+    .then(data => {
+      setHistory(Array.isArray(data) ? data : []);
+      const now = new Date();
+      setSelectedMonth(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`);
+    })
+    .catch(() => setHistory([]))
+    .finally(() => setLoading(false));
+}, []);
 
   // Agrupa por mês
   const byMonth = {};
