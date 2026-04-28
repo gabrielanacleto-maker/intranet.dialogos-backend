@@ -74,6 +74,15 @@ function getComunicadoStyle(tipo) {
     labelColor: '#fff',
     glow: '0 0 12px rgba(244,114,182,0.5)',
   };
+  if (tipo === 'admin') return {
+  border: '2px solid #ff0000',
+  background: 'linear-gradient(135deg, rgba(255,0,0,0.13) 0%, rgba(255,0,0,0.04) 100%)',
+  boxShadow: '0 0 24px rgba(255,0,0,0.35), inset 0 0 40px rgba(255,0,0,0.06)',
+  labelBg: 'linear-gradient(90deg, #cc0000, #ff4444)',
+  labelText: '⚡ Comunicado Admin',
+  labelColor: '#fff',
+  glow: '0 0 16px rgba(255,0,0,0.7)',
+};
   return null;
 }
 
@@ -214,10 +223,10 @@ export default function FeedPage({ feedType = 'feed' }) {
 
   // Quem pode marcar comunicado
   const canMarkDiretoria = user?.role === 'Diretora' || user?.role === 'Diretor';
-  const canMarkLideranca = user?.role === 'Líder';
-  const canMarkRH = !!user?.is_rh;
-  const canMark = !!user?.is_admin
-  const canMarkComunicado = canMarkDiretoria || canMarkLideranca || canMarkRH;
+const canMarkLideranca = user?.role === 'Líder';
+const canMarkRH = !!user?.is_rh;
+const canMarkAdmin = !!user?.is_admin;
+const canMarkComunicado = canMarkDiretoria || canMarkLideranca || canMarkRH || canMarkAdmin;
 
   useEffect(() => { loadPosts(); }, [feedType]);
 
@@ -378,6 +387,12 @@ useEffect(() => {
                 <button onClick={() => setComunicadoTipo(comunicadoTipo === 'rh' ? 'none' : 'rh')}
                   style={{ fontSize: 11, padding: '3px 10px', borderRadius: 20, border: '2px solid #f472b6', cursor: 'pointer', fontFamily: 'inherit', fontWeight: 700, background: comunicadoTipo === 'rh' ? 'linear-gradient(90deg,#db2777,#f472b6)' : 'transparent', color: comunicadoTipo === 'rh' ? '#fff' : '#db2777', boxShadow: comunicadoTipo === 'rh' ? '0 0 10px rgba(244,114,182,0.4)' : 'none' }}>
                   🧬 Comunicado RH
+                </button>
+              )}
+              {canMarkAdmin && (
+                <button onClick={() => setComunicadoTipo(comunicadoTipo === 'admin' ? 'none' : 'admin')}
+                  style={{ fontSize: 11, padding: '3px 10px', borderRadius: 20, border: '2px solid #ff0000', cursor: 'pointer', fontFamily: 'inherit', fontWeight: 700, background: comunicadoTipo === 'admin' ? 'linear-gradient(90deg,#cc0000,#ff4444)' : 'transparent', color: comunicadoTipo === 'admin' ? '#fff' : '#ff0000', boxShadow: comunicadoTipo === 'admin' ? '0 0 10px rgba(255,0,0,0.5)' : 'none' }}>
+                   ⚡ Comunicado Admin
                 </button>
               )}
             </div>
