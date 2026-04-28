@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../services/api';
-import { gamificacao } from '../services/gamificacao';
 import { AV_COLORS, LEVEL_LABEL, LEVEL_BADGE_CLASS, getRoleGlowClass, getRoleStyle, getTenureLabel, getTenureClass } from '../utils';
+import MoodReport from '../components/MoodReport';
 
 const MOODS = [
   { emoji: '😄', label: 'Feliz', value: 'happy', color: '#FFD700' },
