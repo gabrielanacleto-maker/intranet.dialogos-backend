@@ -28,24 +28,6 @@ cloudinary.config(
 
 app = FastAPI(title="Intranet Diálogos API", lifespan=lifespan)
 
-@app.get("/users")
-def get_users():
-    from database import get_db
-
-    conn = get_db()  # 👈 usa o que você já importou
-    conn.row_factory = sqlite3.Row
-
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM users")
-
-    users = cursor.fetchall()
-    conn.close()
-
-    return [dict(u) for u in users]
-
-
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -97,7 +79,7 @@ def require_level(min_level: int):
 
 def log_action(db, actor_key: str, target_key: str, action_type: str, details: str = ""):
     db.execute(
-        "INSERT INTO security_logs (id, actor_key, target_key, action_type, details, created_at) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO security_logs (id, actor_key, target_key, action_type, details, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
         (str(uuid.uuid4()), actor_key, target_key, action_type, details, datetime.datetime.utcnow().isoformat())
     )
     db.commit()
@@ -181,7 +163,7 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
         (key, name, initials, role, dept, level, color, access_level,
          is_admin, is_admin_user, is_rh, is_ouvidor, points,
          password_hash, password_changed, photo_url)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s)""",
         (key, body.name, body.initials, body.role, body.dept,
          body.level, body.color, body.access_level,
          1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
@@ -303,7 +285,7 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
         db.execute("""INSERT INTO posts
     (id, feed, author_key, author_name, author_initials, author_color, author_photo_url,
      text, image_url, embed_url, access_level, comunicado_tipo, pinned, likes, comments, created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
     (
         post_id,
         body.feed,
@@ -414,7 +396,7 @@ def create_mural(body: MuralItemRequest, user=Depends(get_current_user), db=Depe
         raise HTTPException(status_code=403, detail="Sem permissão para publicar no mural.")
     item_id = str(uuid.uuid4())
     db.execute("""INSERT INTO mural_items (id, tag, title, subtitle, content, image_url, created_at)
-        VALUES (?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
         (item_id, body.tag, body.title, body.subtitle, body.content,
          body.image_url or "", datetime.datetime.utcnow().isoformat())
     )
@@ -422,27 +404,39 @@ def create_mural(body: MuralItemRequest, user=Depends(get_current_user), db=Depe
     return {"ok": True, "id": item_id}
 
 @app.post("/api/mural/upload-image")
-def upload_mural_image(file: UploadFile = File(...), user=Depends(get_current_user)):
-    can_post = (user["is_admin"] or user["is_admin_user"] or user["is_rh"] or
-                user["level"] in ["platina", "diamante"])
+def upload_mural_image(
+    file: UploadFile = File(...),
+    user=Depends(get_current_user)
+):
+    can_post = (
+        user["is_admin"] or
+        user["is_admin_user"] or
+        user["is_rh"] or
+        user["level"] in ["platina", "diamante"]
+    )
+
     if not can_post:
         raise HTTPException(status_code=403)
-    if file.size and file.size > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Imagem muito grande (máx 10MB)")
-    ext = Path(file.filename).suffix.lower()
-    if ext not in [".jpg", ".jpeg", ".png", ".gif", ".webp"]:
-        raise HTTPException(status_code=400, detail="Formato inválido")
-    fname = f"mural_{uuid.uuid4().hex[:12]}{ext}"
-    path = UPLOAD_DIR / fname
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    return {"url": f"/uploads/{fname}"}
 
-@app.delete("/api/mural/{item_id}")
-def delete_mural(item_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
-    db.execute("DELETE FROM mural_items WHERE id=%s", (item_id,))
-    db.commit()
-    return {"ok": True}
+    allowed = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+    ext = Path(file.filename).suffix.lower()
+
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail="Formato inválido")
+
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="mural"
+        )
+
+        return {
+            "url": result["secure_url"]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ── FOLDERS & FILES ───────────────────────────────────────────────────────────
 
@@ -454,7 +448,7 @@ def get_folders(user=Depends(get_current_user), db=Depends(get_db)):
 @app.post("/api/folders")
 def create_folder(body: FolderRequest, user=Depends(require_level(2)), db=Depends(get_db)):
     fid = str(uuid.uuid4())
-    db.execute("INSERT INTO folders (id, name, icon, level, drive_link) VALUES (?,?,?,?,?)",
+    db.execute("INSERT INTO folders (id, name, icon, level, drive_link) VALUES (%s,%s,%s,%s,%s)",
                (fid, body.name, body.icon, body.level, body.drive_link or ""))
     db.commit()
     return {"ok": True, "id": fid}
@@ -498,7 +492,7 @@ def upload_folder_file(
         shutil.copyfileobj(file.file, f)
     file_id = str(uuid.uuid4())
     db.execute("""INSERT INTO folder_files (id, folder_id, name, url, size, mime_type, uploaded_by, created_at)
-        VALUES (?,?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
         (file_id, folder_id, file.filename, f"/uploads/{fname}",
          os.path.getsize(path), file.content_type or "",
          user["name"], datetime.datetime.utcnow().isoformat())
@@ -542,7 +536,7 @@ def send_chat_message(body: ChatMessageRequest, user=Depends(get_current_user), 
     mid = str(uuid.uuid4())
     db.execute("""INSERT INTO chat_messages
         (id, room_id, sender_key, sender_name, sender_photo, sender_initials, sender_color, text, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (
             mid,
             body.room_id,
@@ -592,7 +586,7 @@ def create_social_room(body: SocialRoomRequest, user=Depends(get_current_user), 
         raise HTTPException(status_code=400, detail="Nome da sala é obrigatório.")
     room_id = str(uuid.uuid4())
     db.execute("""INSERT INTO social_rooms (id, name, description, created_by, created_at, is_private)
-        VALUES (?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s)""",
         (
             room_id,
             body.name.strip(),
@@ -666,13 +660,24 @@ def add_social_room_member(room_id: str, target_key: str, user=Depends(get_curre
     exists = db.execute("SELECT 1 FROM users WHERE key=%s", (k,)).fetchone()
     if not exists:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-    db.execute("""INSERT INTO social_room_members (id, room_id, user_key, added_by, created_at)
-        VALUES (%s,%s,%s,%s,%s)
-        ON CONFLICT DO NOTHING""",
-        (str(uuid.uuid4()), room_id, k, user["key"], datetime.datetime.utcnow().isoformat())
+    db.execute(
+    """
+    INSERT INTO social_room_members
+    (id, room_id, user_key, added_by, created_at)
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT DO NOTHING
+    """,
+    (
+        str(uuid.uuid4()),
+        room_id,
+        k,
+        user["key"],
+        datetime.datetime.utcnow().isoformat()
+    )
     )
     db.commit()
     return {"ok": True}
+
 
 @app.delete("/api/social-rooms/{room_id}/members/{target_key}")
 def remove_social_room_member(room_id: str, target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
@@ -719,7 +724,7 @@ def upload_social_room_file(
 
     file_id = str(uuid.uuid4())
     db.execute("""INSERT INTO social_room_files (id, room_id, name, url, size, mime_type, uploaded_by, created_at)
-        VALUES (?,?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
         (
             file_id,
             room_id,
@@ -769,7 +774,7 @@ def get_ouvidoria(user=Depends(get_current_user), db=Depends(get_db)):
 def create_ouvidoria(body: OuvidoriaRequest, user=Depends(get_current_user), db=Depends(get_db)):
     oid = str(uuid.uuid4())
     db.execute("""INSERT INTO ouvidoria (id, author_key, author_name, category, text, status, created_at)
-        VALUES (?,?,?,?,?,'aberta',?)""",
+        VALUES (%s,%s,%s,%s,%s,'aberta',%s)""",
         (oid, user["key"], user["name"], body.category, body.text,
          datetime.datetime.utcnow().isoformat())
     )
@@ -825,7 +830,7 @@ def save_organogram(entries: list[OrgEntry], user=Depends(require_level(2)), db=
     for entry in entries:
         org_id = str(uuid.uuid4())
         db.execute("""INSERT INTO organogram (id, user_key, parent_key, position_order, org_tier)
-            VALUES (?,?,?,?,?)""",
+            VALUES (%s,%s,%s,%s,%s)""",
             (org_id, entry.user_key, entry.parent_key or "", entry.position_order, entry.org_tier)
         )
     db.commit()
@@ -836,7 +841,7 @@ def save_organogram(entries: list[OrgEntry], user=Depends(require_level(2)), db=
 @app.post("/api/mood")
 def save_mood(body: MoodRequest, user=Depends(get_current_user), db=Depends(get_db)):
     db.execute("""INSERT INTO mood_history (id, user_key, mood, intensity, reason, created_at)
-        VALUES (?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s)""",
         (str(uuid.uuid4()), user["key"], body.mood, body.intensity, body.reason or "",
          datetime.datetime.utcnow().isoformat())
     )
@@ -861,7 +866,7 @@ def get_price_doctors(folder_id: str, db=Depends(get_db)):
 def create_price_doctor(body: PriceDoctorRequest, user=Depends(require_level(1)), db=Depends(get_db)):
     doctor_id = str(uuid.uuid4())
     db.execute("""INSERT INTO price_doctors (id, folder_id, name, specialty, crm, rqe, position_order, created_at)
-        VALUES (?,?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
         (doctor_id, body.folder_id, body.name, body.specialty or "", body.crm or "",
          body.rqe or "", body.position_order, datetime.datetime.utcnow().isoformat())
     )
@@ -894,7 +899,7 @@ def create_price_procedure(body: PriceProcedureRequest, user=Depends(require_lev
     proc_id = str(uuid.uuid4())
     db.execute("""INSERT INTO price_procedures 
         (id, doctor_id, name, value_cash, value_card_pix, value_bradesco, value_brv, value_prefeitura, position_order, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (proc_id, body.doctor_id, body.name, body.value_cash or 0, body.value_card_pix or 0,
          body.value_bradesco or 0, body.value_brv or 0, body.value_prefeitura or 0,
          body.position_order, datetime.datetime.utcnow().isoformat())
@@ -930,7 +935,7 @@ def create_calendar_event(body: CalendarEventRequest, user=Depends(get_current_u
     event_id = str(uuid.uuid4())
     db.execute("""INSERT INTO calendar_events 
         (id, title, description, location, color, start_date, end_date, all_day, is_public, repeat_type, created_by, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (event_id, body.title, body.description or "", body.location or "", body.color or "#C9A84C",
          body.start_date, body.end_date, 1 if body.all_day else 0, 1 if body.is_public else 0,
          body.repeat_type or "none", user["key"], datetime.datetime.utcnow().isoformat())
@@ -950,6 +955,10 @@ def update_calendar_event(event_id: str, body: CalendarEventRequest, user=Depend
     return {"ok": True}
 
 @app.delete("/api/calendar/{event_id}")
+def delete_calendar_event(event_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    db.execute("DELETE FROM calendar_events WHERE id=%s", (event_id,))
+    db.commit()
+    return {"ok": True}
 # ── GAMIFICAÇÃO (PONTOS, BADGES, LEADERBOARD) ──────────────────────────────
 
 @app.post("/api/gamificacao/add-points")
@@ -962,7 +971,7 @@ def add_points(user_key: str, points: int, reason: str, action_type: str, user=D
     # Adicionar ponto à tabela user_points
     point_id = str(uuid.uuid4())
     db.execute("""INSERT INTO user_points (id, user_key, points, reason, action_type, created_at)
-        VALUES (?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s)""",
         (point_id, user_key, points, reason, action_type, datetime.datetime.utcnow().isoformat())
     )
     
@@ -1008,7 +1017,7 @@ def award_badge(user_key: str, badge_type: str, badge_name: str, description: st
     
     badge_id = str(uuid.uuid4())
     db.execute("""INSERT INTO user_badges (id, user_key, badge_type, badge_name, description, icon, earned_at)
-        VALUES (?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
         (badge_id, user_key, badge_type, badge_name, description, icon, datetime.datetime.utcnow().isoformat())
     )
     
@@ -1113,7 +1122,7 @@ def update_monthly_ranking(user=Depends(require_level(3)), db=Depends(get_db)):
     for position, user_row in enumerate(users, 1):
         ranking_id = str(uuid.uuid4())
         db.execute("""INSERT INTO monthly_ranking (id, user_key, points, position, month, year, updated_at)
-            VALUES (?,?,?,?,?,?,?)""",
+            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
             (ranking_id, user_row["key"], user_row["points"], position, month, now.year, datetime.datetime.utcnow().isoformat())
         )
     
@@ -1136,7 +1145,7 @@ def unlock_achievement(user_key: str, achievement_type: str, achievement_name: s
     
     achievement_id = str(uuid.uuid4())
     db.execute("""INSERT INTO user_achievements (id, user_key, achievement_type, achievement_name, description, icon, unlocked_at)
-        VALUES (?,?,?,?,?,?,?)""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
         (achievement_id, user_key, achievement_type, achievement_name, description, icon, datetime.datetime.utcnow().isoformat())
     )
     
@@ -1201,7 +1210,3 @@ def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db
         "achievements": [dict(a) for a in achievements],
         "recent_points": [dict(h) for h in history]
     }
-def delete_calendar_event(event_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    db.execute("DELETE FROM calendar_events WHERE id=%s", (event_id,))
-    db.commit()
-    return {"ok": True}
