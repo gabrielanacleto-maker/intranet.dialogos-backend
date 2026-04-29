@@ -9,6 +9,8 @@ from models import *
 from database import get_db, init_db
 from auth import create_token, verify_token, hash_password, check_password
 import sqlite3
+import cloudinary
+import cloudinary.uploader
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -17,6 +19,12 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 async def lifespan(app: FastAPI):
     init_db()
     yield
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
 
 app = FastAPI(title="Intranet Diálogos API", lifespan=lifespan)
 
@@ -66,7 +74,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="Token inválido ou expirado")
     db = next(get_db())
     # ✅ Fix: list() garante proper fetch
-    user_row = db.execute("SELECT * FROM users WHERE key=?", (payload["sub"],)).fetchone()
+    user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
     if not user_row:
         raise HTTPException(status_code=401, detail="Usuário não encontrado")
     user = dict(user_row)
@@ -102,7 +110,7 @@ def extract_room_id(channel_value: str | None):
     return None
 
 def can_access_social_room(db, room_id: str, user):
-    room = db.execute("SELECT * FROM social_rooms WHERE id=?", (room_id,)).fetchone()
+    room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,)).fetchone()
     if not room:
         return False, None
     room_dict = dict(room)
@@ -111,7 +119,7 @@ def can_access_social_room(db, room_id: str, user):
     if user["is_admin"] or user["is_admin_user"]:
         return True, room_dict
     member = db.execute(
-        "SELECT 1 FROM social_room_members WHERE room_id=? AND user_key=?",
+        "SELECT 1 FROM social_room_members WHERE room_id=%s AND user_key=%s",
         (room_id, user["key"])
     ).fetchone()
     return bool(member), room_dict
@@ -120,7 +128,7 @@ def can_access_social_room(db, room_id: str, user):
 
 @app.post("/api/auth/login")
 def login(body: LoginRequest, db=Depends(get_db)):
-    user = db.execute("SELECT * FROM users WHERE key=?", (body.key.lower(),)).fetchone()
+    user = db.execute("SELECT * FROM users WHERE key=%s", (body.key.lower(),)).fetchone()
     if not user or not check_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
     token = create_token({"sub": user["key"], "level": user["access_level"]})
@@ -142,7 +150,7 @@ def change_password(body: ChangePasswordRequest, user=Depends(get_current_user),
     if not check_password(body.current_password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Senha atual incorreta.")
     db.execute(
-        "UPDATE users SET password_hash=?, password_changed=1 WHERE key=?",
+        "UPDATE users SET password_hash=%s, password_changed=1 WHERE key=%s",
         (hash_password(body.new_password), user["key"])
     )
     db.commit()
@@ -167,7 +175,7 @@ def list_users(user=Depends(get_current_user), db=Depends(get_db)):
 @app.post("/api/users")
 def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depends(get_db)):
     key = body.key.lower().strip()
-    if db.execute("SELECT 1 FROM users WHERE key=?", (key,)).fetchone():
+    if db.execute("SELECT 1 FROM users WHERE key=%s", (key,)).fetchone():
         raise HTTPException(status_code=400, detail="Usuário já existe.")
     db.execute("""INSERT INTO users
         (key, name, initials, role, dept, level, color, access_level,
@@ -186,7 +194,7 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
 
 @app.put("/api/users/{target_key}")
 def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_current_user), db=Depends(get_db)):
-    target = db.execute("SELECT * FROM users WHERE key=?", (target_key,)).fetchone()
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
     # Self-edit OR admin >= level 2
@@ -195,9 +203,9 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
             raise HTTPException(status_code=403, detail="Sem permissão.")
         if user["access_level"] == 2 and target["access_level"] >= 2:
             raise HTTPException(status_code=403, detail="Você não pode editar admins.")
-    db.execute("""UPDATE users SET name=?, initials=?, role=?, dept=?, level=?,
-         color=?, access_level=?, is_admin=?, is_admin_user=?, is_rh=?, is_ouvidor=?, points=?
-         WHERE key=?""",
+    db.execute("""UPDATE users SET name=%s, initials=%s, role=%s, dept=%s, level=%s,
+         color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, points=%s
+         WHERE key=%s""",
         (body.name, body.initials, body.role, body.dept, body.level,
          body.color, body.access_level,
          1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
@@ -209,12 +217,12 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
 
 @app.post("/api/users/{target_key}/reset-password")
 def reset_password(target_key: str, body: ResetPasswordRequest, user=Depends(require_level(2)), db=Depends(get_db)):
-    target = db.execute("SELECT * FROM users WHERE key=?", (target_key,)).fetchone()
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
     if user["access_level"] == 2 and target["access_level"] >= 2:
         raise HTTPException(status_code=403, detail="Regra de ouro: você não pode resetar admins do mesmo nível ou superior.")
-    db.execute("UPDATE users SET password_hash=?, password_changed=0 WHERE key=?",
+    db.execute("UPDATE users SET password_hash=%s, password_changed=0 WHERE key=%s",
                (hash_password(body.new_password), target_key))
     db.commit()
     log_action(db, user["key"], target_key, "Reset de Senha",
@@ -223,12 +231,12 @@ def reset_password(target_key: str, body: ResetPasswordRequest, user=Depends(req
 
 @app.delete("/api/users/{target_key}")
 def delete_user(target_key: str, user=Depends(require_level(2)), db=Depends(get_db)):
-    target = db.execute("SELECT * FROM users WHERE key=?", (target_key,)).fetchone()
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404)
     if user["access_level"] == 2 and target["access_level"] >= 2:
         raise HTTPException(status_code=403, detail="Regra de ouro violada.")
-    db.execute("DELETE FROM users WHERE key=?", (target_key,))
+    db.execute("DELETE FROM users WHERE key=%s", (target_key,))
     db.commit()
     log_action(db, user["key"], target_key, "Exclusão de Usuário", f"Removeu {target['name']}")
     return {"ok": True}
@@ -238,12 +246,16 @@ def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user), d
     ext = Path(file.filename or "foto.jpg").suffix.lower()
     if ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
         raise HTTPException(status_code=400, detail="Formato invalido. Use JPG, PNG ou WEBP.")
-    fname = f"photo_{user['key']}_{uuid.uuid4().hex[:8]}{ext}"
-    path = UPLOAD_DIR / fname
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    url = f"/uploads/{fname}"
-    db.execute("UPDATE users SET photo_url=? WHERE key=?", (url, user["key"]))
+    
+    result = cloudinary.uploader.upload(
+        file.file,
+        folder="dialogos/fotos",
+        public_id=f"photo_{user['key']}",
+        overwrite=True
+    )
+    url = result["secure_url"]
+    
+    db.execute("UPDATE users SET photo_url=%s WHERE key=%s", (url, user["key"]))
     db.commit()
     return {"url": url}
 
@@ -264,7 +276,7 @@ def get_posts(feed: str = "feed", user=Depends(get_current_user), db=Depends(get
         if not allowed:
             raise HTTPException(status_code=403, detail="Sem acesso a esta sala.")
     rows = db.execute(
-        "SELECT * FROM posts WHERE feed=? ORDER BY pinned DESC, created_at DESC", (feed,)
+        "SELECT * FROM posts WHERE feed=%s ORDER BY pinned DESC, created_at DESC", (feed,)
     ).fetchall()
     result = []
     for r in rows:
@@ -334,28 +346,28 @@ def upload_post_image(file: UploadFile = File(...), user=Depends(get_current_use
 
 @app.delete("/api/posts/{post_id}")
 def delete_post(post_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    post = db.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
+    post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
     if not post:
         raise HTTPException(status_code=404)
     if post["author_key"] != user["key"] and not (user["is_admin"] or user["is_admin_user"]):
         raise HTTPException(status_code=403)
-    db.execute("DELETE FROM posts WHERE id=?", (post_id,))
+    db.execute("DELETE FROM posts WHERE id=%s", (post_id,))
     db.commit()
     return {"ok": True}
 
 @app.post("/api/posts/{post_id}/pin")
 def pin_post(post_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
-    post = db.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
+    post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
     if not post:
         raise HTTPException(status_code=404)
     new_pin = 0 if post["pinned"] else 1
-    db.execute("UPDATE posts SET pinned=? WHERE id=?", (new_pin, post_id))
+    db.execute("UPDATE posts SET pinned=%s WHERE id=%s", (new_pin, post_id))
     db.commit()
     return {"pinned": bool(new_pin)}
 
 @app.post("/api/posts/{post_id}/like")
 def toggle_like(post_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    post = db.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
+    post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
     if not post:
         raise HTTPException(status_code=404)
     likes = json.loads(post["likes"] or "[]")
@@ -363,13 +375,13 @@ def toggle_like(post_id: str, user=Depends(get_current_user), db=Depends(get_db)
         likes.remove(user["key"])
     else:
         likes.append(user["key"])
-    db.execute("UPDATE posts SET likes=? WHERE id=?", (json.dumps(likes), post_id))
+    db.execute("UPDATE posts SET likes=%s WHERE id=%s", (json.dumps(likes), post_id))
     db.commit()
     return {"likes": likes}
 
 @app.post("/api/posts/{post_id}/comment")
 def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_user), db=Depends(get_db)):
-    post = db.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
+    post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
     if not post:
         raise HTTPException(status_code=404)
     comments = json.loads(post["comments"] or "[]")
@@ -383,7 +395,7 @@ def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_use
         "text": body.text,
         "created_at": datetime.datetime.utcnow().isoformat()
     })
-    db.execute("UPDATE posts SET comments=? WHERE id=?", (json.dumps(comments), post_id))
+    db.execute("UPDATE posts SET comments=%s WHERE id=%s", (json.dumps(comments), post_id))
     db.commit()
     return {"comments": comments}
 
@@ -428,7 +440,7 @@ def upload_mural_image(file: UploadFile = File(...), user=Depends(get_current_us
 
 @app.delete("/api/mural/{item_id}")
 def delete_mural(item_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
-    db.execute("DELETE FROM mural_items WHERE id=?", (item_id,))
+    db.execute("DELETE FROM mural_items WHERE id=%s", (item_id,))
     db.commit()
     return {"ok": True}
 
@@ -449,24 +461,24 @@ def create_folder(body: FolderRequest, user=Depends(require_level(2)), db=Depend
 
 @app.put("/api/folders/{folder_id}")
 def update_folder(folder_id: str, body: FolderRequest, user=Depends(require_level(2)), db=Depends(get_db)):
-    db.execute("UPDATE folders SET name=?, icon=?, level=?, drive_link=? WHERE id=?",
+    db.execute("UPDATE folders SET name=%s, icon=%s, level=%s, drive_link=%s WHERE id=%s",
                (body.name, body.icon, body.level, body.drive_link or "", folder_id))
     db.commit()
     return {"ok": True}
 
 @app.delete("/api/folders/{folder_id}")
 def delete_folder(folder_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
-    db.execute("DELETE FROM folders WHERE id=?", (folder_id,))
-    db.execute("DELETE FROM folder_files WHERE folder_id=?", (folder_id,))
+    db.execute("DELETE FROM folders WHERE id=%s", (folder_id,))
+    db.execute("DELETE FROM folder_files WHERE folder_id=%s", (folder_id,))
     db.commit()
     return {"ok": True}
 
 @app.get("/api/folders/{folder_id}/files")
 def get_folder_files(folder_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    folder = db.execute("SELECT * FROM folders WHERE id=?", (folder_id,)).fetchone()
+    folder = db.execute("SELECT * FROM folders WHERE id=%s", (folder_id,)).fetchone()
     if not folder:
         raise HTTPException(status_code=404)
-    rows = db.execute("SELECT * FROM folder_files WHERE folder_id=? ORDER BY created_at DESC", (folder_id,)).fetchall()
+    rows = db.execute("SELECT * FROM folder_files WHERE folder_id=%s ORDER BY created_at DESC", (folder_id,)).fetchall()
     return [dict(r) for r in rows]
 
 @app.post("/api/folders/{folder_id}/files")
@@ -496,10 +508,10 @@ def upload_folder_file(
 
 @app.delete("/api/folders/{folder_id}/files/{file_id}")
 def delete_folder_file(folder_id: str, file_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
-    f = db.execute("SELECT * FROM folder_files WHERE id=? AND folder_id=?", (file_id, folder_id)).fetchone()
+    f = db.execute("SELECT * FROM folder_files WHERE id=%s AND folder_id=%s", (file_id, folder_id)).fetchone()
     if not f:
         raise HTTPException(status_code=404)
-    db.execute("DELETE FROM folder_files WHERE id=?", (file_id,))
+    db.execute("DELETE FROM folder_files WHERE id=%s", (file_id,))
     db.commit()
     return {"ok": True}
 
@@ -513,7 +525,7 @@ def get_chat_messages(room_id: str, user=Depends(get_current_user), db=Depends(g
         if not allowed:
             raise HTTPException(status_code=403, detail="Sem acesso a esta sala.")
     rows = db.execute(
-        "SELECT * FROM chat_messages WHERE room_id=? ORDER BY created_at ASC LIMIT 500",
+        "SELECT * FROM chat_messages WHERE room_id=%s ORDER BY created_at ASC LIMIT 500",
         (room_id,)
     ).fetchall()
     return [dict(r) for r in rows]
@@ -560,15 +572,15 @@ def list_social_rooms(user=Depends(get_current_user), db=Depends(get_db)):
         room["posts_feed"] = f"sala_{room['id']}"
         room["chat_room_id"] = f"sala_{room['id']}"
         room["files_count"] = db.execute(
-            "SELECT COUNT(*) FROM social_room_files WHERE room_id=?",
+            "SELECT COUNT(*) FROM social_room_files WHERE room_id=%s",
             (room["id"],)
         ).fetchone()[0]
         room["members_count"] = db.execute(
-            "SELECT COUNT(*) FROM social_room_members WHERE room_id=?",
+            "SELECT COUNT(*) FROM social_room_members WHERE room_id=%s",
             (room["id"],)
         ).fetchone()[0]
         room["is_member"] = bool(db.execute(
-            "SELECT 1 FROM social_room_members WHERE room_id=? AND user_key=?",
+            "SELECT 1 FROM social_room_members WHERE room_id=%s AND user_key=%s",
             (room["id"], user["key"])
         ).fetchone())
         result.append(room)
@@ -590,27 +602,29 @@ def create_social_room(body: SocialRoomRequest, user=Depends(get_current_user), 
             1 if body.is_private else 0,
         )
     )
-    db.execute("""INSERT OR IGNORE INTO social_room_members (id, room_id, user_key, added_by, created_at)
-        VALUES (?,?,?,?,?)""",
+    db.execute("""INSERT INTO social_room_members (id, room_id, user_key, added_by, created_at)
+        VALUES (%s,%s,%s,%s,%s)
+        ON CONFLICT DO NOTHING""",
         (str(uuid.uuid4()), room_id, user["key"], user["key"], datetime.datetime.utcnow().isoformat())
     )
     for member_key in (body.member_keys or []):
         k = (member_key or "").strip().lower()
         if not k or k == user["key"]:
             continue
-        exists = db.execute("SELECT 1 FROM users WHERE key=?", (k,)).fetchone()
+        exists = db.execute("SELECT 1 FROM users WHERE key=%s", (k,)).fetchone()
         if not exists:
             continue
-        db.execute("""INSERT OR IGNORE INTO social_room_members (id, room_id, user_key, added_by, created_at)
-            VALUES (?,?,?,?,?)""",
-            (str(uuid.uuid4()), room_id, k, user["key"], datetime.datetime.utcnow().isoformat())
-        )
+        db.execute("""INSERT INTO social_room_members (id, room_id, user_key, added_by, created_at)
+    VALUES (%s,%s,%s,%s,%s)
+    ON CONFLICT DO NOTHING""",
+    (str(uuid.uuid4()), room_id, k, user["key"], datetime.datetime.utcnow().isoformat())
+)
     db.commit()
     return {"ok": True, "id": room_id}
 
 @app.delete("/api/social-rooms/{room_id}")
 def delete_social_room(room_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    room = db.execute("SELECT * FROM social_rooms WHERE id=?", (room_id,)).fetchone()
+    room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,)).fetchone()
     if not room:
         raise HTTPException(status_code=404, detail="Sala não encontrada.")
     if room["created_by"] != user["key"] and not (user["is_admin"] or user["is_admin_user"]):
@@ -619,11 +633,11 @@ def delete_social_room(room_id: str, user=Depends(get_current_user), db=Depends(
     room_feed = f"sala_{room_id}"
     room_chat = f"sala_{room_id}"
 
-    db.execute("DELETE FROM social_rooms WHERE id=?", (room_id,))
-    db.execute("DELETE FROM social_room_files WHERE room_id=?", (room_id,))
-    db.execute("DELETE FROM social_room_members WHERE room_id=?", (room_id,))
-    db.execute("DELETE FROM posts WHERE feed=?", (room_feed,))
-    db.execute("DELETE FROM chat_messages WHERE room_id=?", (room_chat,))
+    db.execute("DELETE FROM social_rooms WHERE id=%s", (room_id,))
+    db.execute("DELETE FROM social_room_files WHERE room_id=%s", (room_id,))
+    db.execute("DELETE FROM social_room_members WHERE room_id=%s", (room_id,))
+    db.execute("DELETE FROM posts WHERE feed=%s", (room_feed,))
+    db.execute("DELETE FROM chat_messages WHERE room_id=%s", (room_chat,))
     db.commit()
     return {"ok": True}
 
@@ -636,24 +650,25 @@ def list_social_room_members(room_id: str, user=Depends(get_current_user), db=De
         SELECT m.user_key, m.added_by, m.created_at, u.name, u.initials, u.role, u.photo_url
         FROM social_room_members m
         JOIN users u ON u.key = m.user_key
-        WHERE m.room_id=?
+        WHERE m.room_id=%s
         ORDER BY u.name
     """, (room_id,)).fetchall()
     return {"room": dict(room), "members": [dict(r) for r in rows]}
 
 @app.post("/api/social-rooms/{room_id}/members/{target_key}")
 def add_social_room_member(room_id: str, target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
-    room = db.execute("SELECT * FROM social_rooms WHERE id=?", (room_id,)).fetchone()
+    room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,)).fetchone()
     if not room:
         raise HTTPException(status_code=404, detail="Sala não encontrada.")
     if room["created_by"] != user["key"] and not (user["is_admin"] or user["is_admin_user"]):
         raise HTTPException(status_code=403, detail="Sem permissão para adicionar membros.")
     k = target_key.strip().lower()
-    exists = db.execute("SELECT 1 FROM users WHERE key=?", (k,)).fetchone()
+    exists = db.execute("SELECT 1 FROM users WHERE key=%s", (k,)).fetchone()
     if not exists:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-    db.execute("""INSERT OR IGNORE INTO social_room_members (id, room_id, user_key, added_by, created_at)
-        VALUES (?,?,?,?,?)""",
+    db.execute("""INSERT INTO social_room_members (id, room_id, user_key, added_by, created_at)
+        VALUES (%s,%s,%s,%s,%s)
+        ON CONFLICT DO NOTHING""",
         (str(uuid.uuid4()), room_id, k, user["key"], datetime.datetime.utcnow().isoformat())
     )
     db.commit()
@@ -661,7 +676,7 @@ def add_social_room_member(room_id: str, target_key: str, user=Depends(get_curre
 
 @app.delete("/api/social-rooms/{room_id}/members/{target_key}")
 def remove_social_room_member(room_id: str, target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
-    room = db.execute("SELECT * FROM social_rooms WHERE id=?", (room_id,)).fetchone()
+    room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,)).fetchone()
     if not room:
         raise HTTPException(status_code=404, detail="Sala não encontrada.")
     if room["created_by"] != user["key"] and not (user["is_admin"] or user["is_admin_user"]):
@@ -669,7 +684,7 @@ def remove_social_room_member(room_id: str, target_key: str, user=Depends(get_cu
     k = target_key.strip().lower()
     if k == room["created_by"]:
         raise HTTPException(status_code=400, detail="O criador da sala não pode ser removido.")
-    db.execute("DELETE FROM social_room_members WHERE room_id=? AND user_key=?", (room_id, k))
+    db.execute("DELETE FROM social_room_members WHERE room_id=%s AND user_key=%s", (room_id, k))
     db.commit()
     return {"ok": True}
 
@@ -679,7 +694,7 @@ def list_social_room_files(room_id: str, user=Depends(get_current_user), db=Depe
     if not allowed:
         raise HTTPException(status_code=403, detail="Sem acesso a esta sala.")
     rows = db.execute(
-        "SELECT * FROM social_room_files WHERE room_id=? ORDER BY created_at DESC",
+        "SELECT * FROM social_room_files WHERE room_id=%s ORDER BY created_at DESC",
         (room_id,)
     ).fetchall()
     return [dict(r) for r in rows]
@@ -726,7 +741,7 @@ def delete_social_room_file(room_id: str, file_id: str, user=Depends(get_current
         raise HTTPException(status_code=403, detail="Sem acesso a esta sala.")
 
     entry = db.execute(
-        "SELECT * FROM social_room_files WHERE id=? AND room_id=?",
+        "SELECT * FROM social_room_files WHERE id=%s AND room_id=%s",
         (file_id, room_id)
     ).fetchone()
     if not entry:
@@ -735,7 +750,7 @@ def delete_social_room_file(room_id: str, file_id: str, user=Depends(get_current
     if room["created_by"] != user["key"] and not (user["is_admin"] or user["is_admin_user"]):
         raise HTTPException(status_code=403, detail="Sem permissão para remover arquivos desta sala.")
 
-    db.execute("DELETE FROM social_room_files WHERE id=?", (file_id,))
+    db.execute("DELETE FROM social_room_files WHERE id=%s", (file_id,))
     db.commit()
     return {"ok": True}
 
@@ -746,7 +761,7 @@ def get_ouvidoria(user=Depends(get_current_user), db=Depends(get_db)):
     if user["is_ouvidor"] or user["is_admin"] or user["is_admin_user"]:
         rows = db.execute("SELECT * FROM ouvidoria ORDER BY created_at DESC").fetchall()
     else:
-        rows = db.execute("SELECT * FROM ouvidoria WHERE author_key=? ORDER BY created_at DESC",
+        rows = db.execute("SELECT * FROM ouvidoria WHERE author_key=%s ORDER BY created_at DESC",
                           (user["key"],)).fetchall()
     return [dict(r) for r in rows]
 
@@ -763,13 +778,13 @@ def create_ouvidoria(body: OuvidoriaRequest, user=Depends(get_current_user), db=
 
 @app.put("/api/ouvidoria/{oid}/status")
 def update_ouvidoria_status(oid: str, body: OuvidoriaStatusRequest, user=Depends(require_level(2)), db=Depends(get_db)):
-    db.execute("UPDATE ouvidoria SET status=? WHERE id=?", (body.status, oid))
+    db.execute("UPDATE ouvidoria SET status=%s WHERE id=%s", (body.status, oid))
     db.commit()
     return {"ok": True}
 
 @app.post("/api/ouvidoria/{oid}/respond")
 def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(require_level(2)), db=Depends(get_db)):
-    ouid = db.execute("SELECT responses FROM ouvidoria WHERE id=?", (oid,)).fetchone()
+    ouid = db.execute("SELECT responses FROM ouvidoria WHERE id=%s", (oid,)).fetchone()
     if not ouid:
         raise HTTPException(status_code=404, detail="Ouvidoria não encontrada")
     responses = json.loads(ouid[0] or "[]")
@@ -779,7 +794,7 @@ def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(req
         "text": body.text,
         "created_at": datetime.datetime.utcnow().isoformat()
     })
-    db.execute("UPDATE ouvidoria SET responses=? WHERE id=?", (json.dumps(responses), oid))
+    db.execute("UPDATE ouvidoria SET responses=%s WHERE id=%s", (json.dumps(responses), oid))
     db.commit()
     return {"ok": True}
 
@@ -792,7 +807,7 @@ def get_ranking(user=Depends(get_current_user), db=Depends(get_db)):
 
 @app.put("/api/users/{target_key}/points")
 def update_points(target_key: str, body: PointsRequest, user=Depends(require_level(2)), db=Depends(get_db)):
-    db.execute("UPDATE users SET points=? WHERE key=?", (body.points, target_key))
+    db.execute("UPDATE users SET points=%s WHERE key=%s", (body.points, target_key))
     db.commit()
     return {"ok": True}
 
@@ -830,7 +845,7 @@ def save_mood(body: MoodRequest, user=Depends(get_current_user), db=Depends(get_
 
 @app.get("/api/mood/history")
 def get_mood_history(user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute("SELECT * FROM mood_history WHERE user_key=? ORDER BY created_at DESC LIMIT 30",
+    rows = db.execute("SELECT * FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 30",
                       (user["key"],)).fetchall()
     return [dict(r) for r in rows]
 
@@ -838,7 +853,7 @@ def get_mood_history(user=Depends(get_current_user), db=Depends(get_db)):
 
 @app.get("/api/price-doctors")
 def get_price_doctors(folder_id: str, db=Depends(get_db)):
-    rows = db.execute("SELECT * FROM price_doctors WHERE folder_id=? ORDER BY position_order ASC",
+    rows = db.execute("SELECT * FROM price_doctors WHERE folder_id=%s ORDER BY position_order ASC",
                       (folder_id,)).fetchall()
     return [dict(r) for r in rows]
 
@@ -855,7 +870,7 @@ def create_price_doctor(body: PriceDoctorRequest, user=Depends(require_level(1))
 
 @app.put("/api/price-doctors/{doctor_id}")
 def update_price_doctor(doctor_id: str, body: PriceDoctorRequest, user=Depends(require_level(1)), db=Depends(get_db)):
-    db.execute("""UPDATE price_doctors SET name=?, specialty=?, crm=?, rqe=?, position_order=? WHERE id=?""",
+    db.execute("""UPDATE price_doctors SET name=%s, specialty=%s, crm=%s, rqe=%s, position_order=%s WHERE id=%s""",
         (body.name, body.specialty or "", body.crm or "", body.rqe or "", body.position_order, doctor_id)
     )
     db.commit()
@@ -863,14 +878,14 @@ def update_price_doctor(doctor_id: str, body: PriceDoctorRequest, user=Depends(r
 
 @app.delete("/api/price-doctors/{doctor_id}")
 def delete_price_doctor(doctor_id: str, user=Depends(require_level(1)), db=Depends(get_db)):
-    db.execute("DELETE FROM price_procedures WHERE doctor_id=?", (doctor_id,))
-    db.execute("DELETE FROM price_doctors WHERE id=?", (doctor_id,))
+    db.execute("DELETE FROM price_procedures WHERE doctor_id=%s", (doctor_id,))
+    db.execute("DELETE FROM price_doctors WHERE id=%s", (doctor_id,))
     db.commit()
     return {"ok": True}
 
 @app.get("/api/price-procedures/{doctor_id}")
 def get_price_procedures(doctor_id: str, db=Depends(get_db)):
-    rows = db.execute("SELECT * FROM price_procedures WHERE doctor_id=? ORDER BY position_order ASC",
+    rows = db.execute("SELECT * FROM price_procedures WHERE doctor_id=%s ORDER BY position_order ASC",
                       (doctor_id,)).fetchall()
     return [dict(r) for r in rows]
 
@@ -889,8 +904,8 @@ def create_price_procedure(body: PriceProcedureRequest, user=Depends(require_lev
 
 @app.put("/api/price-procedures/{proc_id}")
 def update_price_procedure(proc_id: str, body: PriceProcedureRequest, user=Depends(require_level(1)), db=Depends(get_db)):
-    db.execute("""UPDATE price_procedures SET name=?, value_cash=?, value_card_pix=?, value_bradesco=?, 
-        value_brv=?, value_prefeitura=?, position_order=? WHERE id=?""",
+    db.execute("""UPDATE price_procedures SET name=%s, value_cash=%s, value_card_pix=%s, value_bradesco=%s, 
+        value_brv=%s, value_prefeitura=%s, position_order=%s WHERE id=%s""",
         (body.name, body.value_cash or 0, body.value_card_pix or 0, body.value_bradesco or 0,
          body.value_brv or 0, body.value_prefeitura or 0, body.position_order, proc_id)
     )
@@ -899,7 +914,7 @@ def update_price_procedure(proc_id: str, body: PriceProcedureRequest, user=Depen
 
 @app.delete("/api/price-procedures/{proc_id}")
 def delete_price_procedure(proc_id: str, user=Depends(require_level(1)), db=Depends(get_db)):
-    db.execute("DELETE FROM price_procedures WHERE id=?", (proc_id,))
+    db.execute("DELETE FROM price_procedures WHERE id=%s", (proc_id,))
     db.commit()
     return {"ok": True}
 
@@ -925,8 +940,8 @@ def create_calendar_event(body: CalendarEventRequest, user=Depends(get_current_u
 
 @app.put("/api/calendar/{event_id}")
 def update_calendar_event(event_id: str, body: CalendarEventRequest, user=Depends(get_current_user), db=Depends(get_db)):
-    db.execute("""UPDATE calendar_events SET title=?, description=?, location=?, color=?, 
-        start_date=?, end_date=?, all_day=?, is_public=?, repeat_type=? WHERE id=?""",
+    db.execute("""UPDATE calendar_events SET title=%s, description=%s, location=%s, color=%s, 
+        start_date=%s, end_date=%s, all_day=%s, is_public=%s, repeat_type=%s WHERE id=%s""",
         (body.title, body.description or "", body.location or "", body.color or "#C9A84C",
          body.start_date, body.end_date, 1 if body.all_day else 0, 1 if body.is_public else 0,
          body.repeat_type or "none", event_id)
@@ -940,7 +955,7 @@ def update_calendar_event(event_id: str, body: CalendarEventRequest, user=Depend
 @app.post("/api/gamificacao/add-points")
 def add_points(user_key: str, points: int, reason: str, action_type: str, user=Depends(require_level(2)), db=Depends(get_db)):
     """Admin adiciona pontos a um usuário"""
-    target = db.execute("SELECT * FROM users WHERE key=?", (user_key,)).fetchone()
+    target = db.execute("SELECT * FROM users WHERE key=%s", (user_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     
@@ -954,7 +969,7 @@ def add_points(user_key: str, points: int, reason: str, action_type: str, user=D
     # Atualizar pontos totais do usuário
     current_points = target["points"] or 0
     new_total = current_points + points
-    db.execute("UPDATE users SET points=? WHERE key=?", (new_total, user_key))
+    db.execute("UPDATE users SET points=%s WHERE key=%s", (new_total, user_key))
     
     db.commit()
     return {"ok": True, "new_total": new_total, "points_added": points}
@@ -962,12 +977,12 @@ def add_points(user_key: str, points: int, reason: str, action_type: str, user=D
 @app.get("/api/gamificacao/user-points/{user_key}")
 def get_user_points(user_key: str, user=Depends(get_current_user), db=Depends(get_db)):
     """Obter pontos totais de um usuário"""
-    target = db.execute("SELECT key, name, points FROM users WHERE key=?", (user_key,)).fetchone()
+    target = db.execute("SELECT key, name, points FROM users WHERE key=%s", (user_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     
     # Histórico de pontos
-    history = db.execute("SELECT * FROM user_points WHERE user_key=? ORDER BY created_at DESC LIMIT 50",
+    history = db.execute("SELECT * FROM user_points WHERE user_key=%s ORDER BY created_at DESC LIMIT 50",
                         (user_key,)).fetchall()
     
     return {
@@ -981,12 +996,12 @@ def get_user_points(user_key: str, user=Depends(get_current_user), db=Depends(ge
 def award_badge(user_key: str, badge_type: str, badge_name: str, description: str, icon: str, 
                 user=Depends(require_level(2)), db=Depends(get_db)):
     """Admin concede uma badge a um usuário"""
-    target = db.execute("SELECT * FROM users WHERE key=?", (user_key,)).fetchone()
+    target = db.execute("SELECT * FROM users WHERE key=%s", (user_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     
     # Verificar se já tem essa badge
-    existing = db.execute("SELECT 1 FROM user_badges WHERE user_key=? AND badge_type=?",
+    existing = db.execute("SELECT 1 FROM user_badges WHERE user_key=%s AND badge_type=%s",
                          (user_key, badge_type)).fetchone()
     if existing:
         raise HTTPException(status_code=400, detail="Usuário já tem essa badge")
@@ -1003,11 +1018,11 @@ def award_badge(user_key: str, badge_type: str, badge_name: str, description: st
 @app.get("/api/gamificacao/user-badges/{user_key}")
 def get_user_badges(user_key: str, user=Depends(get_current_user), db=Depends(get_db)):
     """Obter todas as badges de um usuário"""
-    target = db.execute("SELECT key, name FROM users WHERE key=?", (user_key,)).fetchone()
+    target = db.execute("SELECT key, name FROM users WHERE key=%s", (user_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     
-    badges = db.execute("SELECT * FROM user_badges WHERE user_key=? ORDER BY earned_at DESC",
+    badges = db.execute("SELECT * FROM user_badges WHERE user_key=%s ORDER BY earned_at DESC",
                        (user_key,)).fetchall()
     
     return {
@@ -1032,7 +1047,7 @@ def get_leaderboard(month: str = None, user=Depends(get_current_user), db=Depend
         SELECT mr.user_key, mr.points, mr.position, u.name, u.initials, u.color
         FROM monthly_ranking mr
         JOIN users u ON u.key = mr.user_key
-        WHERE mr.month=?
+        WHERE mr.month=%s
         ORDER BY mr.position ASC
     """, (month,)).fetchall()
     
@@ -1092,7 +1107,7 @@ def update_monthly_ranking(user=Depends(require_level(3)), db=Depends(get_db)):
     users = db.execute("SELECT key, points FROM users WHERE points > 0 ORDER BY points DESC").fetchall()
     
     # Limpar ranking anterior do mês
-    db.execute("DELETE FROM monthly_ranking WHERE month=?", (month,))
+    db.execute("DELETE FROM monthly_ranking WHERE month=%s", (month,))
     
     # Inserir novo ranking
     for position, user_row in enumerate(users, 1):
@@ -1109,12 +1124,12 @@ def update_monthly_ranking(user=Depends(require_level(3)), db=Depends(get_db)):
 def unlock_achievement(user_key: str, achievement_type: str, achievement_name: str, description: str, icon: str,
                       user=Depends(require_level(2)), db=Depends(get_db)):
     """Conceder uma conquista (achievement) a um usuário"""
-    target = db.execute("SELECT * FROM users WHERE key=?", (user_key,)).fetchone()
+    target = db.execute("SELECT * FROM users WHERE key=%s", (user_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     
     # Verificar se já tem essa conquista
-    existing = db.execute("SELECT 1 FROM user_achievements WHERE user_key=? AND achievement_type=?",
+    existing = db.execute("SELECT 1 FROM user_achievements WHERE user_key=%s AND achievement_type=%s",
                          (user_key, achievement_type)).fetchone()
     if existing:
         raise HTTPException(status_code=400, detail="Usuário já tem essa conquista")
@@ -1131,11 +1146,11 @@ def unlock_achievement(user_key: str, achievement_type: str, achievement_name: s
 @app.get("/api/gamificacao/user-achievements/{user_key}")
 def get_user_achievements(user_key: str, user=Depends(get_current_user), db=Depends(get_db)):
     """Obter todas as conquistas de um usuário"""
-    target = db.execute("SELECT key, name FROM users WHERE key=?", (user_key,)).fetchone()
+    target = db.execute("SELECT key, name FROM users WHERE key=%s", (user_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     
-    achievements = db.execute("SELECT * FROM user_achievements WHERE user_key=? ORDER BY unlocked_at DESC",
+    achievements = db.execute("SELECT * FROM user_achievements WHERE user_key=%s ORDER BY unlocked_at DESC",
                              (user_key,)).fetchall()
     
     return {
@@ -1148,7 +1163,7 @@ def get_user_achievements(user_key: str, user=Depends(get_current_user), db=Depe
 @app.get("/api/gamificacao/dashboard/{user_key}")
 def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db=Depends(get_db)):
     """Dashboard completo de gamificação do usuário"""
-    target = db.execute("SELECT * FROM users WHERE key=?", (user_key,)).fetchone()
+    target = db.execute("SELECT * FROM users WHERE key=%s", (user_key,)).fetchone()
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     
@@ -1156,13 +1171,13 @@ def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db
     total_points = target["points"] or 0
     
     # Badges
-    badges = db.execute("SELECT * FROM user_badges WHERE user_key=?", (user_key,)).fetchall()
+    badges = db.execute("SELECT * FROM user_badges WHERE user_key=%s", (user_key,)).fetchall()
     
     # Conquistas
-    achievements = db.execute("SELECT * FROM user_achievements WHERE user_key=?", (user_key,)).fetchall()
+    achievements = db.execute("SELECT * FROM user_achievements WHERE user_key=%s", (user_key,)).fetchall()
     
     # Histórico de pontos (últimos 10)
-    history = db.execute("SELECT * FROM user_points WHERE user_key=? ORDER BY created_at DESC LIMIT 10",
+    history = db.execute("SELECT * FROM user_points WHERE user_key=%s ORDER BY created_at DESC LIMIT 10",
                         (user_key,)).fetchall()
     
     # Posição no ranking (mês atual)
@@ -1170,7 +1185,7 @@ def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db
     now = datetime.datetime.utcnow()
     month = f"{now.year}-{str(now.month).zfill(2)}"
     
-    ranking = db.execute("SELECT position FROM monthly_ranking WHERE user_key=? AND month=?",
+    ranking = db.execute("SELECT position FROM monthly_ranking WHERE user_key=%s AND month=%s",
                         (user_key, month)).fetchone()
     position = ranking["position"] if ranking else None
     
@@ -1187,6 +1202,6 @@ def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db
         "recent_points": [dict(h) for h in history]
     }
 def delete_calendar_event(event_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    db.execute("DELETE FROM calendar_events WHERE id=?", (event_id,))
+    db.execute("DELETE FROM calendar_events WHERE id=%s", (event_id,))
     db.commit()
     return {"ok": True}
