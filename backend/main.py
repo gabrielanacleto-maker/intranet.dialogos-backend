@@ -854,6 +854,12 @@ def get_mood_history(user=Depends(get_current_user), db=Depends(get_db)):
                       (user["key"],)).fetchall()
     return [dict(r) for r in rows]
 
+@app.post("/api/mood/reset")
+def reset_mood(user=Depends(get_current_user), db=Depends(get_db)):
+    db.execute("DELETE FROM mood_history WHERE user_key=%s", (user["key"],))
+    db.commit()
+    return {"ok": True}
+
 # ── PRICE DOCTORS (Tabela de Preços) ──────────────────────────────────────────
 
 @app.get("/api/price-doctors")
