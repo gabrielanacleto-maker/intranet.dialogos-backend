@@ -16,11 +16,12 @@ import { AV_COLORS, LEVEL_LABEL, LEVEL_BADGE_CLASS, CURSOR_OPTIONS, getTenureLab
 import CalendarioPage from './pages/CalendarioPage';
 import SalaPage from './pages/SalaPage';
 import Leaderboard from './pages/Leaderboard';
-import Loading from 'src/pages/Loading.jsx'
+import Loading from './pages/Loading';
 
 export default function App() {
   const { user, mustChangePassword, logout, canSeeNovidades, canAdmin } = useAuth();
   const [page, setPage] = useState('feed');
+  const [loading, setLoading] = useState(false);
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('dialogos_theme') === 'dark');
 
   // Apply theme
@@ -36,23 +37,32 @@ export default function App() {
     document.body.classList.add(`cursor-${saved}`);
   }, [user]);
 
+  function changePage(newPage) {
+  setLoading(true);
+
+  setTimeout(() => {
+    setPage(newPage);
+    setLoading(false);
+  }, 1200);
+}
+
   if (!user) return <><LoginPage /><CursorGlow /></>;
   if (mustChangePassword) return <><ChangePasswordPage /><CursorGlow /></>;
 
   const avatarBg = AV_COLORS[user.color] || '#C9A84C';
-  const roleStyle = getRoleStyle(user.role, user.is_rh, user.is_admin);
   const photoUrl = user.photo_url ? api.assetUrl(user.photo_url) : null;
-  
+  const roleStyle = getRoleStyle(user.role, user.is_rh, user.is_admin);
+
   const navItems = [
     { key: 'novidades', label: 'Feed Novidades Diálogos', icon: '✨', show: canSeeNovidades, highlight: true },
     { key: 'feed', label: 'Feed Diálogos', icon: '📋', show: true },
     { key: 'sala', label: 'Sala', icon: '💬', show: true },
-    { key: 'leaderboard', label: 'Leaderboard', icon: '🏆', show: true },
     { key: 'myprofile', label: 'Meu Perfil', icon: '👤', show: true },
     { key: 'calendario', label: 'Calendário', icon: '📅', show: true },
     { key: 'docs', label: 'Documentações', icon: '📁', show: true },
     { key: 'team', label: 'Equipe', icon: '👥', show: true },
     { key: 'ouvidoria', label: 'Ouvidoria', icon: '📢', show: true },
+    { key: 'leaderboard', label: 'Leaderboard', icon: '🏆', show: true },
   ];
 
   const adminItems = [
@@ -81,6 +91,8 @@ export default function App() {
     }
   }
 
+  if (loading) return <Loading />;
+  
   return (
     <>
       <CursorGlow />
@@ -111,7 +123,7 @@ export default function App() {
             <div className="topbar-icon" title="Notificações">🔔</div>
             <div
               className="topbar-avatar"
-              onClick={() => setPage('myprofile')}
+              onClick={() => changePage('myprofile')}
               title="Meu Perfil"
               style={{ overflow: 'hidden', background: photoUrl ? 'transparent' : avatarBg }}
             >
@@ -164,7 +176,7 @@ export default function App() {
           {navItems.filter(n => n.show).map(n => (
             <div key={n.key}
               className={`nav-item${page === n.key ? ' active' : ''}`}
-              onClick={() => setPage(n.key)}
+              onClick={() => changePage(n.key)}
               style={n.highlight && page !== n.key ? { color: 'var(--gold)', fontWeight: 600 } : {}}
             >
               <span className="nav-icon">{n.icon}</span>
@@ -176,7 +188,7 @@ export default function App() {
             <>
               <div className="nav-section-label">Admin</div>
               {adminItems.filter(a => a.show).map(a => (
-                <div key={a.key} className={`nav-item${page === a.key ? ' active' : ''}`} onClick={() => setPage(a.key)}>
+                <div key={a.key} className={`nav-item${page === a.key ? ' active' : ''}`} onClick={() => changePage(a.key)}>
                   <span className="nav-icon">{a.icon}</span>
                   {a.label}
                 </div>
@@ -209,7 +221,7 @@ export default function App() {
             <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
               {CURSOR_OPTIONS.find(c => c.key === (localStorage.getItem('dialogos_cursor') || 'normal'))?.label || 'Normal'}
             </div>
-            <button className="btn-admin btn-secondary" style={{ padding: '5px 10px', fontSize: 11, marginTop: 8 }} onClick={() => setPage('myprofile')}>
+            <button className="btn-admin btn-secondary" style={{ padding: '5px 10px', fontSize: 11, marginTop: 8 }} onClick={() => changePage('myprofile')}>
               Mudar cursor →
             </button>
           </div>
