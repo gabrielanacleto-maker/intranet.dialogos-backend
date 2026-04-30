@@ -15,6 +15,9 @@ import { api } from './services/api';
 import { AV_COLORS, LEVEL_LABEL, LEVEL_BADGE_CLASS, CURSOR_OPTIONS, getTenureLabel, getTenureClass, getRoleGlowClass, getRoleStyle } from './utils';
 import CalendarioPage from './pages/CalendarioPage';
 import SalaPage from './pages/SalaPage';
+import Leaderboard from './pages/Leaderboard';
+import Loading from 'src/pages/Loading.jsx'
+import RouteLoader from './RouteLoader'
 
 export default function App() {
   const { user, mustChangePassword, logout, canSeeNovidades, canAdmin } = useAuth();
@@ -38,13 +41,14 @@ export default function App() {
   if (mustChangePassword) return <><ChangePasswordPage /><CursorGlow /></>;
 
   const avatarBg = AV_COLORS[user.color] || '#C9A84C';
-  const photoUrl = user.photo_url ? api.assetUrl(user.photo_url) : localStorage.getItem('profilePhoto_' + user.key);
   const roleStyle = getRoleStyle(user.role, user.is_rh, user.is_admin);
-
+  const photoUrl = user.photo_url ? api.assetUrl(user.photo_url) : null;
+  
   const navItems = [
     { key: 'novidades', label: 'Feed Novidades Diálogos', icon: '✨', show: canSeeNovidades, highlight: true },
     { key: 'feed', label: 'Feed Diálogos', icon: '📋', show: true },
     { key: 'sala', label: 'Sala', icon: '💬', show: true },
+    { key: 'leaderboard', label: 'Leaderboard', icon: '🏆', show: true },
     { key: 'myprofile', label: 'Meu Perfil', icon: '👤', show: true },
     { key: 'calendario', label: 'Calendário', icon: '📅', show: true },
     { key: 'docs', label: 'Documentações', icon: '📁', show: true },
@@ -67,6 +71,7 @@ export default function App() {
       case 'ouvidoria': return <OuvidoriaPage />;
       case 'calendario': return <CalendarioPage />;
       case 'sala': return <SalaPage />;
+      case 'leaderboard': return <Leaderboard />;
       default: return (
         <div style={{ textAlign: 'center', padding: '80px 20px', color: 'var(--text-muted)' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>🚧</div>
@@ -133,7 +138,6 @@ export default function App() {
                 if (!file) return;
                 try {
                   const res = await api.uploadPhoto(file);
-                  localStorage.setItem('profilePhoto_' + user.key, api.assetUrl(res.url));
                   window.location.reload();
                 } catch (err) { alert(err.message); }
                 e.target.value = '';
