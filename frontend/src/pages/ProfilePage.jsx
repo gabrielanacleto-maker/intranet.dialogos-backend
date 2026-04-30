@@ -19,10 +19,6 @@ export default function ProfilePage() {
 
   useEffect(() => {
     if (user?.photo_url) setPhoto(api.assetUrl(user.photo_url));
-    else {
-      const saved = localStorage.getItem('profilePhoto_' + user?.key);
-      if (saved) setPhoto(saved);
-    }
   }, [user]);
 
   useEffect(() => {
@@ -44,7 +40,6 @@ export default function ProfilePage() {
       const res = await api.uploadPhoto(file);
       const url = api.assetUrl(res.url);
       setPhoto(url);
-      localStorage.setItem('profilePhoto_' + user.key, url);
       await refreshUsers();
       toast('Foto atualizada!', 'success');
     } catch (err) { toast(err.message, 'error'); }
