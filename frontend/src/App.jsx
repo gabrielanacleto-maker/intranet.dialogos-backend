@@ -23,8 +23,6 @@ export default function App() {
   const [page, setPage] = useState('feed');
   const [loading, setLoading] = useState(false);
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('dialogos_theme') === 'dark');
-  console.log('APP SRC');
-  document.body.style.background = 'red';
 
   // Apply theme
   useEffect(() => {
