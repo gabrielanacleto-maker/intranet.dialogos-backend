@@ -20,8 +20,7 @@ export default function App() {
   const { user, mustChangePassword, logout, canSeeNovidades, canAdmin } = useAuth();
   const [page, setPage] = useState('feed');
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('dialogos_theme') === 'dark');
-  document.body.style.background = 'blue';
-  alert('APP RAIZ');
+  
   
   // Apply theme
   useEffect(() => {
