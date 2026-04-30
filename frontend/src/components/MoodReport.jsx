@@ -110,7 +110,7 @@ export default function MoodReport() {
     URL.revokeObjectURL(url);
   }
 async function handleReset() {
-  const confirm = window.confirm("Tem certeza que deseja resetar SEUS dados?");
+  const confirm = window.confirm("Tem certeza que deseja resetar seus dados?");
   if (!confirm) return;
 
   try {
