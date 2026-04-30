@@ -7,12 +7,18 @@ export default function Loading() {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: '#0f172a',
+        background: '#000000',
         color: '#fff',
         flexDirection: 'column',
         gap: '16px'
       }}
     >
+        <img
+        src="/logo.png.png"
+        alt="Logo"
+        style={{ width: '120px', marginBottom: '8px' }}
+      />
+
       <div
         style={{
           width: '60px',
