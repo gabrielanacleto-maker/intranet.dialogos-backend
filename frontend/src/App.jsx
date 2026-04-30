@@ -17,7 +17,6 @@ import CalendarioPage from './pages/CalendarioPage';
 import SalaPage from './pages/SalaPage';
 import Leaderboard from './pages/Leaderboard';
 import Loading from 'src/pages/Loading.jsx'
-import RouteLoader from './RouteLoader'
 
 export default function App() {
   const { user, mustChangePassword, logout, canSeeNovidades, canAdmin } = useAuth();
