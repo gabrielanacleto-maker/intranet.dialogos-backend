@@ -38,7 +38,8 @@ app.add_middleware(
         "http://localhost:4173",
         "http://127.0.0.1:4173",
         "http://localhost:3000",
-        "http://localhost:*",  # ✅ Fix CORS wildcard dev
+        "http://localhost:*",
+        "https://intranet-dialogos.vercel.app",  # ✅ Fix CORS wildcard dev
     ],
     allow_credentials=True,
     allow_methods=["*"],
