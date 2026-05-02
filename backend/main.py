@@ -3,14 +3,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
-import sqlite3, os, uuid, shutil, datetime, hashlib, json
+import os, uuid, shutil, datetime, json
 from pathlib import Path
+
 from models import *
 from database import get_db, init_db
 from auth import create_token, verify_token, hash_password, check_password
-import sqlite3
+
 import cloudinary
 import cloudinary.uploader
+
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -77,12 +79,19 @@ def require_level(min_level: int):
         return user
     return checker
 
-def log_action(db, actor_key: str, target_key: str, action_type: str, details: str = ""):
+def log_action(db, actor_key, target_key, action_type, details=""):
     db.execute(
         "INSERT INTO security_logs (id, actor_key, target_key, action_type, details, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
-        (str(uuid.uuid4()), actor_key, target_key, action_type, details, datetime.datetime.utcnow().isoformat())
+        (
+            str(uuid.uuid4()),
+            actor_key,
+            target_key,
+            action_type,
+            details,
+            datetime.datetime.utcnow().isoformat()
+        )
     )
-    db.commit()
+
 
 def extract_room_id(channel_value: str | None):
     if not channel_value:
@@ -307,6 +316,24 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
 )
 
         
+        # ── Notification trigger ──
+        is_comunicado = bool(body.comunicado_tipo)
+        notif_title = "📢 Novo comunicado" if is_comunicado else "📋 Nova publicação"
+        notif_msg = f"{user['name']} publicou: {(body.text or '')[:80]}"
+        _notify(db, title=notif_title, message=notif_msg,
+                ntype="comunicado" if is_comunicado else "post",
+                audience=body.access_level if body.access_level not in ("all", "") else "all",
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=post_id, play_sound=False)
+        # ── Mention triggers ──
+        for mention_key in _extract_mentions(body.text):
+            target = db.execute("SELECT key, name FROM users WHERE key=%s", (mention_key,)).fetchone()
+            if target and target["key"] != user["key"]:
+                _notify(db, title="👋 Você foi mencionado",
+                        message=f"{user['name']} mencionou você em uma publicação",
+                        ntype="mention", target_user_key=target["key"],
+                        sender_key=user["key"], sender_name=user["name"],
+                        reference_id=post_id, play_sound=True)
         db.commit()
         return {"ok": True, "id": post_id}
     except Exception as e:
@@ -378,6 +405,23 @@ def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_use
         "created_at": datetime.datetime.utcnow().isoformat()
     })
     db.execute("UPDATE posts SET comments=%s WHERE id=%s", (json.dumps(comments), post_id))
+    # Notify post author if different from commenter
+    post_dict = dict(post)
+    if post_dict.get("author_key") and post_dict["author_key"] != user["key"]:
+        _notify(db, title="💬 Novo comentário",
+                message=f"{user['name']} comentou: {(body.text or '')[:80]}",
+                ntype="comment", target_user_key=post_dict["author_key"],
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=post_id, play_sound=True)
+    # Mention triggers in comment
+    for mention_key in _extract_mentions(body.text):
+        target = db.execute("SELECT key FROM users WHERE key=%s", (mention_key,)).fetchone()
+        if target and target["key"] != user["key"]:
+            _notify(db, title="👋 Você foi mencionado",
+                    message=f"{user['name']} mencionou você em um comentário",
+                    ntype="mention", target_user_key=target["key"],
+                    sender_key=user["key"], sender_name=user["name"],
+                    reference_id=post_id, play_sound=True)
     db.commit()
     return {"comments": comments}
 
@@ -549,6 +593,15 @@ def send_chat_message(body: ChatMessageRequest, user=Depends(get_current_user), 
             datetime.datetime.utcnow().isoformat()
         )
     )
+    # Mention triggers in chat
+    for mention_key in _extract_mentions(body.text):
+        target = db.execute("SELECT key FROM users WHERE key=%s", (mention_key,)).fetchone()
+        if target and target["key"] != user["key"]:
+            _notify(db, title="💬 Você foi mencionado no chat",
+                    message=f"{user['name']}: {(body.text or '')[:80]}",
+                    ntype="mention", target_user_key=target["key"],
+                    sender_key=user["key"], sender_name=user["name"],
+                    reference_id=mid, play_sound=True)
     db.commit()
     return {"ok": True, "id": mid}
 
@@ -1216,3 +1269,283 @@ def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db
         "achievements": [dict(a) for a in achievements],
         "recent_points": [dict(h) for h in history]
     }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEEDBACK SYSTEM
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ensure_feedback_tables(db):
+    """Create feedback tables if not exist (idempotent)."""
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS feedbacks (
+            id TEXT PRIMARY KEY,
+            target_user_key TEXT NOT NULL,
+            evaluator_key TEXT NOT NULL,
+            evaluator_name TEXT NOT NULL,
+            evaluator_sector TEXT NOT NULL,
+            feedback_text TEXT NOT NULL,
+            rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 10),
+            action TEXT NOT NULL CHECK (action IN ('add', 'remove')),
+            points INTEGER NOT NULL CHECK (points >= 0 AND points <= 100),
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY,
+            actor_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_user_id TEXT NOT NULL,
+            detail TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+
+def _sanitize_text(text: str) -> str:
+    """Strip dangerous HTML/JS patterns from user input."""
+    import re
+    if not text:
+        return ""
+    dangerous = [
+        r'<script[\s\S]*?>[\s\S]*?</script>', r'<iframe[\s\S]*?>', r'<object[\s\S]*?>',
+        r'<embed[\s\S]*?>', r'javascript:', r'onerror\s*=', r'onclick\s*=',
+        r'onload\s*=', r'eval\s*\(', r'Function\s*\(', r'document\.cookie',
+        r'window\.location', r'innerHTML',
+    ]
+    for pattern in dangerous:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    # Strip all HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    return text.strip()[:2000]
+
+
+def _can_evaluate(user: dict) -> bool:
+    """Only RH, admin, admin_user, or ouvidor can create feedback."""
+    return bool(user.get('is_admin') or user.get('is_admin_user') or
+                user.get('is_rh') or user.get('is_ouvidor'))
+
+
+@app.get("/api/feedbacks/{target_key}")
+def get_feedbacks(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_feedback_tables(db)
+    rows = db.execute(
+        "SELECT * FROM feedbacks WHERE target_user_key=%s ORDER BY created_at DESC",
+        (target_key,)
+    ).fetchall()
+    feedbacks = []
+    is_owner = user["key"] == target_key
+    for r in rows:
+        row = dict(r)
+        if not is_owner:
+            row.pop("points", None)
+            row.pop("action", None)
+        feedbacks.append(row)
+    return feedbacks
+
+
+@app.post("/api/feedbacks")
+def create_feedback(body: FeedbackRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    import uuid, datetime, re
+    _ensure_feedback_tables(db)
+
+    if not _can_evaluate(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para avaliar colaboradores")
+
+    # Validate
+    if not 1 <= body.rating <= 10:
+        raise HTTPException(status_code=422, detail="Nota deve ser entre 1 e 10")
+    if not 0 <= body.points <= 100:
+        raise HTTPException(status_code=422, detail="Pontos devem ser entre 0 e 100")
+    if body.action not in ("add", "remove"):
+        raise HTTPException(status_code=422, detail="Ação inválida")
+
+    safe_text = _sanitize_text(body.feedback_text)
+    safe_sector = _sanitize_text(body.evaluator_sector)
+    if not safe_text:
+        raise HTTPException(status_code=422, detail="Feedback não pode ser vazio")
+
+    # Check rate limit: 1 feedback por avaliador por colaborador a cada 6h
+    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).isoformat()
+    existing = db.execute(
+        "SELECT id FROM feedbacks WHERE evaluator_key=%s AND target_user_key=%s AND created_at > %s",
+        (user["key"], body.target_user_key, cutoff)
+    ).fetchone()
+    if existing:
+        raise HTTPException(status_code=429, detail="Aguarde 6 horas para avaliar este colaborador novamente")
+
+    # Verify target exists
+    target = db.execute("SELECT key, points FROM users WHERE key=%s", (body.target_user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Colaborador não encontrado")
+
+    now = datetime.datetime.utcnow().isoformat()
+    fid = str(uuid.uuid4())
+
+    # Insert feedback
+    db.execute(
+        """INSERT INTO feedbacks
+           (id, target_user_key, evaluator_key, evaluator_name, evaluator_sector,
+            feedback_text, rating, action, points, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (fid, body.target_user_key, user["key"], user["name"],
+         safe_sector, safe_text, body.rating, body.action, body.points, now)
+    )
+
+    # Update XP
+    current_xp = target["points"] or 0
+    delta = body.points if body.action == "add" else -body.points
+    new_xp = max(0, current_xp + delta)
+    db.execute("UPDATE users SET points=%s WHERE key=%s", (new_xp, body.target_user_key))
+
+    # Audit log
+    db.execute(
+        """INSERT INTO audit_log (id, actor_id, action, target_user_id, detail, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s)""",
+        (str(uuid.uuid4()), user["key"],
+         f"feedback_{body.action}_points",
+         body.target_user_key,
+         f"rating={body.rating} points={body.points if body.action=='add' else -body.points}",
+         now)
+    )
+
+    # ── Notification triggers ──
+    action_label = f"+{body.points} XP" if body.action == "add" else f"-{body.points} XP"
+    _notify(db, title="⭐ Avaliação recebida",
+            message=f"{user['name']} avaliou você com nota {body.rating}/10 ({action_label})",
+            ntype="feedback", target_user_key=body.target_user_key,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=fid, play_sound=True)
+    xp_title = "💰 XP adicionado" if body.action == "add" else "📉 XP reduzido"
+    xp_msg = (f"Você ganhou {body.points} XP." if body.action == "add"
+              else f"Você perdeu {body.points} XP.") + f" Total: {new_xp} XP"
+    _notify(db, title=xp_title, message=xp_msg,
+            ntype="xp", target_user_key=body.target_user_key,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=fid, play_sound=True)
+    # Rank change detection
+    _RANK_THRESHOLDS = [(0,49,"Aspirante"),(50,149,"Motivado"),(150,299,"Engajado"),
+        (300,499,"Competidor"),(500,699,"Destaque"),(700,899,"Referência"),
+        (900,999,"Elite"),(1000,9999999,"Lenda")]
+    def _get_rank(xp):
+        return next((r[2] for r in _RANK_THRESHOLDS if r[0] <= xp <= r[1]), "Aspirante")
+    old_rank = _get_rank(current_xp)
+    new_rank  = _get_rank(new_xp)
+    if old_rank != new_rank:
+        _notify(db, title="🏆 Novo rank alcançado!",
+                message=f"Parabéns! Você alcançou o rank {new_rank}",
+                ntype="system", target_user_key=body.target_user_key,
+                sender_key=user["key"], sender_name=user["name"], play_sound=True)
+    old_level = current_xp // 100
+    new_level  = new_xp // 100
+    if new_level > old_level:
+        _notify(db, title="⬆️ Subiu de nível!",
+                message=f"Você subiu para o Nível {new_level}!",
+                ntype="system", target_user_key=body.target_user_key, play_sound=True)
+    return {"ok": True, "feedback_id": fid, "new_xp": new_xp}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# NOTIFICATION SYSTEM
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _ensure_notifications_table(db):
+    """Idempotent — create notifications table + indexes if not exist."""
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            type TEXT NOT NULL,
+            target_user_key TEXT NULL,
+            audience TEXT NULL DEFAULT 'personal',
+            sender_key TEXT NULL,
+            sender_name TEXT NULL,
+            reference_id TEXT NULL,
+            play_sound BOOLEAN DEFAULT FALSE,
+            is_read BOOLEAN DEFAULT FALSE,
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_notif_target ON notifications(target_user_key)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_notif_audience ON notifications(audience)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_notif_created ON notifications(created_at DESC)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(is_read)")
+
+
+def _notify(db, *, title: str, message: str, ntype: str,
+            target_user_key: str = None, audience: str = None,
+            sender_key: str = None, sender_name: str = None,
+            reference_id: str = None, play_sound: bool = False):
+    """Insert a notification. Call after the main operation succeeds."""
+    import uuid, datetime
+    _ensure_notifications_table(db)
+    db.execute(
+        """INSERT INTO notifications
+           (id, title, message, type, target_user_key, audience,
+            sender_key, sender_name, reference_id, play_sound, is_read, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (str(uuid.uuid4()), title, message, ntype,
+         target_user_key, audience or ('personal' if target_user_key else 'all'),
+         sender_key, sender_name, reference_id, play_sound, False,
+         datetime.datetime.utcnow().isoformat())
+    )
+
+
+def _extract_mentions(text: str):
+    """Return list of @keys found in text."""
+    import re
+    return re.findall(r'@([A-Za-z0-9_]+)', text or '')
+
+
+# ── GET notifications ─────────────────────────────────────────────────────────
+@app.get("/api/notifications")
+def get_notifications(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_notifications_table(db)
+    rows = db.execute(
+        """SELECT * FROM notifications
+           WHERE target_user_key = %s
+              OR audience = 'all'
+              OR audience = %s
+           ORDER BY created_at DESC
+           LIMIT 40""",
+        (user["key"], user.get("dept", ""))
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/notifications/unread-count")
+def get_unread_count(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_notifications_table(db)
+    row = db.execute(
+        """SELECT COUNT(*) as cnt FROM notifications
+           WHERE is_read = FALSE
+             AND (target_user_key = %s OR audience = 'all' OR audience = %s)""",
+        (user["key"], user.get("dept", ""))
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+
+@app.post("/api/notifications/{notif_id}/read")
+def mark_read(notif_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_notifications_table(db)
+    # Only mark if notification belongs to this user
+    db.execute(
+        """UPDATE notifications SET is_read = TRUE
+           WHERE id = %s
+             AND (target_user_key = %s OR audience = 'all' OR audience = %s)""",
+        (notif_id, user["key"], user.get("dept", ""))
+    )
+    return {"ok": True}
+
+
+@app.post("/api/notifications/read-all")
+def mark_all_read(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_notifications_table(db)
+    db.execute(
+        """UPDATE notifications SET is_read = TRUE
+           WHERE is_read = FALSE
+             AND (target_user_key = %s OR audience = 'all' OR audience = %s)""",
+        (user["key"], user.get("dept", ""))
+    )
+    return {"ok": True}
