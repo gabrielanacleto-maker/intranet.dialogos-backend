@@ -142,3 +142,11 @@ class CalendarEventRequest(BaseModel):
     all_day: Optional[bool] = False
     is_public: Optional[bool] = False
     repeat_type: Optional[str] = 'none'
+
+class FeedbackRequest(BaseModel):
+    target_user_key: str
+    evaluator_sector: str
+    feedback_text: str
+    rating: int
+    action: str        # "add" ou "remove"
+    points: int

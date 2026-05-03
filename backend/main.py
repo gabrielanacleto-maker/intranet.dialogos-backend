@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 import os, uuid, shutil, datetime, json
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from models import *
 from database import get_db, init_db
 from auth import create_token, verify_token, hash_password, check_password
