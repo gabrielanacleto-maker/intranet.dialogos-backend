@@ -21,11 +21,14 @@ if not ADMIN_DEFAULT_PASSWORD or not DEFAULT_USER_PASSWORD:
 
 
 # Conexão global persistente — evita "Cannot operate on a closed database"
-_conn = None
-
 def get_connection():
     global _conn
-    if _conn is None or _conn.closed:
+    try:
+        if _conn is None or _conn.closed:
+            raise Exception("reconectar")
+        # Testa se a conexão está viva
+        _conn.cursor().execute("SELECT 1")
+    except Exception:
         _conn = psycopg2.connect(DB_URL)
         _conn.autocommit = False
     return _conn
