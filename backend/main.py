@@ -9,7 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from models import *
-from database import get_db, init_db
+from database import get_db, init_db, get_db_context
 from auth import create_token, verify_token, hash_password, check_password
 
 import cloudinary
@@ -59,13 +59,12 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     payload = verify_token(credentials.credentials)
     if not payload:
         raise HTTPException(status_code=401, detail="Token inválido ou expirado")
-    db = next(get_db())
-    # ✅ Fix: list() garante proper fetch
-    user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
-    if not user_row:
-        raise HTTPException(status_code=401, detail="Usuário não encontrado")
-    user = dict(user_row)
-    return user
+    
+    with get_db_context() as db:
+        user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
+        if not user_row:
+            raise HTTPException(status_code=401, detail="Usuário não encontrado")
+        return dict(user_row)
 
 def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if not credentials:
@@ -104,7 +103,8 @@ def extract_room_id(channel_value: str | None):
     return None
 
 def can_access_social_room(db, room_id: str, user):
-    room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,)).fetchone()
+    room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,))
+    user = db.fetchone()
     if not room:
         return False, None
     room_dict = dict(room)
@@ -115,15 +115,16 @@ def can_access_social_room(db, room_id: str, user):
     member = db.execute(
         "SELECT 1 FROM social_room_members WHERE room_id=%s AND user_key=%s",
         (room_id, user["key"])
-    ).fetchone()
+    )
+    user = db.fetchone()
     return bool(member), room_dict
 
 # ── AUTH ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/login")
 def login(body: LoginRequest, db=Depends(get_db)):
-    print("DB RECEBIDO:", db)
-    user = db.execute("SELECT * FROM users WHERE key=%s", (body.key.lower(),)).fetchone()
+    user = db.execute("SELECT * FROM users WHERE key=%s", (body.key.lower(),))
+    user = db.fetchone()
     if not user or not check_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
     token = create_token({"sub": user["key"], "level": user["access_level"]})
