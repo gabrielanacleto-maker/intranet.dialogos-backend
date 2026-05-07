@@ -15,6 +15,7 @@ DEFAULT_USER_PASSWORD = os.getenv("DEFAULT_USER_PASSWORD")
 
 if not DB_URL:
     raise ValueError("DATABASE_URL não configurada")
+print(f"DB_URL carregada: {DB_URL[:30]}...")
 
 if not ADMIN_DEFAULT_PASSWORD or not DEFAULT_USER_PASSWORD:
     raise ValueError("Senhas padrão não configuradas")
