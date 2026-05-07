@@ -5,6 +5,7 @@ import uuid
 
 from auth import hash_password
 from dotenv import load_dotenv
+from contextlib import contextmanager
 
 load_dotenv()
 
@@ -19,7 +20,8 @@ if not ADMIN_DEFAULT_PASSWORD or not DEFAULT_USER_PASSWORD:
     raise ValueError("Senhas padrão não configuradas")
 
 
-def get_db():
+@contextmanager
+def get_db_context():
     conn = psycopg2.connect(DB_URL)
     conn.autocommit = False
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -33,6 +35,9 @@ def get_db():
         cursor.close()
         conn.close()
 
+def get_db():
+    with get_db_context() as cursor:
+        yield cursor
 
 def init_db():
     conn = psycopg2.connect(DB_URL)
