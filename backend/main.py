@@ -122,6 +122,7 @@ def can_access_social_room(db, room_id: str, user):
 
 @app.post("/api/auth/login")
 def login(body: LoginRequest, db=Depends(get_db)):
+    print("DB RECEBIDO:", db)
     user = db.execute("SELECT * FROM users WHERE key=%s", (body.key.lower(),)).fetchone()
     if not user or not check_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
