@@ -626,11 +626,11 @@ def list_social_rooms(user=Depends(get_current_user), db=Depends(get_db)):
         room["files_count"] = db.execute(
             "SELECT COUNT(*) FROM social_room_files WHERE room_id=%s",
             (room["id"],)
-        ).fetchone()[0]
+        ).fetchone()["count"]
         room["members_count"] = db.execute(
             "SELECT COUNT(*) FROM social_room_members WHERE room_id=%s",
             (room["id"],)
-        ).fetchone()[0]
+        ).fetchone()["count"]
         room["is_member"] = bool(db.execute(
             "SELECT 1 FROM social_room_members WHERE room_id=%s AND user_key=%s",
             (room["id"], user["key"])
