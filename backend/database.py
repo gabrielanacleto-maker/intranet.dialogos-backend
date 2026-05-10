@@ -21,12 +21,19 @@ if not ADMIN_DEFAULT_PASSWORD or not DEFAULT_USER_PASSWORD:
     raise ValueError("Senhas padrão não configuradas")
 
 class SmartCursor:
-    def __init__(self, cursor):
+    def __init__(self, cursor, conn):
         self._cursor = cursor
+        self._conn = conn
 
     def execute(self, *args, **kwargs):
         self._cursor.execute(*args, **kwargs)
         return self._cursor
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
 
     def __getattr__(self, name):
         return getattr(self._cursor, name)
@@ -35,7 +42,7 @@ class SmartCursor:
 def get_db_context():
     conn = psycopg2.connect(DB_URL)
     conn.autocommit = False
-    cursor = SmartCursor(conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor))
+    cursor = SmartCursor(conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor), conn)
     try:
         yield cursor
         conn.commit()
