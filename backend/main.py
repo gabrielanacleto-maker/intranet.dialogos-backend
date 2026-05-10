@@ -478,23 +478,31 @@ def upload_mural_image(
         raise HTTPException(status_code=403)
 
     allowed = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
-    ext = Path(file.filename).suffix.lower()
+    ext = Path(file.filename or "mural.jpg").suffix.lower()
 
     if ext not in allowed:
         raise HTTPException(status_code=400, detail="Formato inválido")
 
-    try:
-        result = cloudinary.uploader.upload(
-            file.file,
-            folder="mural"
-        )
+    contents = file.file.read()
+    if len(contents) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Imagem maior que 8MB.")
 
-        return {
-            "url": result["secure_url"]
-        }
+    if os.getenv("CLOUDINARY_CLOUD_NAME") and os.getenv("CLOUDINARY_API_KEY") and os.getenv("CLOUDINARY_API_SECRET"):
+        try:
+            result = cloudinary.uploader.upload(
+                contents,
+                folder="mural"
+            )
+            return {"url": result["secure_url"]}
+        except Exception:
+            pass
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    mural_dir = UPLOAD_DIR / "mural"
+    mural_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4()}{ext}"
+    path = mural_dir / filename
+    path.write_bytes(contents)
+    return {"url": f"/uploads/mural/{filename}"}
 
 
 # ── FOLDERS & FILES ───────────────────────────────────────────────────────────
