@@ -1554,3 +1554,196 @@ def mark_all_read(user=Depends(get_current_user), db=Depends(get_db)):
         (user["key"], user.get("dept", ""))
     )
     return {"ok": True}
+
+    # ============================================================
+# COLE ESSAS ROTAS NO FINAL DO SEU main.py
+# ============================================================
+#
+# ANTES: rode esse SQL no seu banco Neon para adicionar
+# as colunas e a tabela necessárias:
+#
+# ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_key TEXT DEFAULT NULL;
+# ALTER TABLE users ADD COLUMN IF NOT EXISTS org_position TEXT DEFAULT 'colaborador';
+#   -- valores possíveis: 'colaborador', 'lider', 'gestor'
+#
+# ============================================================
+
+from pydantic import BaseModel
+from typing import Optional, List
+
+# ---------- Models ----------
+
+class AssignManagerRequest(BaseModel):
+    """Admin define o gestor de um usuário"""
+    target_user_key: str          # usuário que vai receber o gestor
+    manager_key: Optional[str]    # chave do gestor (None = remover gestor)
+
+class AssignTeamRequest(BaseModel):
+    """Admin define a equipe de um usuário"""
+    target_user_key: str          # usuário que vai receber a equipe
+    member_keys: List[str]        # lista de chaves dos membros da equipe
+
+class SetOrgPositionRequest(BaseModel):
+    """Admin define a posição organizacional de um usuário"""
+    target_user_key: str
+    org_position: str             # 'colaborador' | 'lider' | 'gestor'
+
+
+# ---------- Helpers ----------
+
+def _require_admin(user: dict):
+    """Garante que só admin ou admin_user acessa"""
+    if not (user.get("is_admin") or user.get("is_admin_user")):
+        raise HTTPException(status_code=403, detail="Acesso negado. Apenas admins.")
+
+
+def _safe_user(row) -> dict:
+    """Converte row em dict removendo campos sensíveis"""
+    d = dict(row)
+    d.pop("password_hash", None)
+    d.pop("password_changed", None)
+    return d
+
+
+# ---------- Rotas ----------
+
+@app.get("/api/users/gestores")
+def list_gestores(user=Depends(get_current_user), db=Depends(get_db)):
+    """
+    Retorna todos os usuários com org_position IN ('lider', 'gestor').
+    Usado no dropdown de seleção de gestor no frontend.
+    """
+    rows = db.execute(
+        """SELECT key, name, role, dept, photo_url, org_position
+           FROM users
+           WHERE org_position IN ('lider', 'gestor')
+           ORDER BY name"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/users/{target_key}/manager")
+def get_user_manager(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
+    """
+    Retorna o gestor atual do usuário alvo.
+    """
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    manager_key = target["manager_key"] if "manager_key" in target.keys() else None
+    if not manager_key:
+        return {"manager": None}
+
+    manager = db.execute(
+        "SELECT key, name, role, dept, photo_url FROM users WHERE key=%s",
+        (manager_key,)
+    ).fetchone()
+    return {"manager": dict(manager) if manager else None}
+
+
+@app.put("/api/users/assign-manager")
+def assign_manager(body: AssignManagerRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    """
+    Admin define (ou remove) o gestor de um usuário.
+    """
+    _require_admin(user)
+
+    target = db.execute("SELECT * FROM users WHERE key=%s", (body.target_user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário alvo não encontrado.")
+
+    if body.manager_key:
+        manager = db.execute("SELECT * FROM users WHERE key=%s", (body.manager_key,)).fetchone()
+        if not manager:
+            raise HTTPException(status_code=404, detail="Gestor não encontrado.")
+        if manager["org_position"] not in ("lider", "gestor"):
+            raise HTTPException(status_code=400, detail="Usuário selecionado não é gestor ou líder.")
+
+    db.execute(
+        "UPDATE users SET manager_key=%s WHERE key=%s",
+        (body.manager_key, body.target_user_key)
+    )
+    db.commit()
+
+    log_action(
+        db, user["key"], body.target_user_key,
+        "Atribuição de Gestor",
+        f"Gestor definido: {body.manager_key or 'removido'}"
+    )
+    return {"ok": True}
+
+
+@app.get("/api/users/{target_key}/team")
+def get_user_team(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
+    """
+    Retorna a equipe do usuário:
+    - Se for 'gestor': retorna todos que têm manager_key = target_key
+    - Se for 'lider': retorna todos que têm manager_key = target_key (seus subordinados)
+    - Se for 'colaborador': retorna colegas (mesmo gestor, excluindo ele mesmo)
+    """
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    org_position = target["org_position"] if "org_position" in target.keys() else "colaborador"
+    manager_key = target["manager_key"] if "manager_key" in target.keys() else None
+
+    if org_position in ("gestor", "lider"):
+        # Subordinados diretos
+        rows = db.execute(
+            """SELECT key, name, role, dept, photo_url, org_position
+               FROM users
+               WHERE manager_key=%s
+               ORDER BY name""",
+            (target_key,)
+        ).fetchall()
+        return {
+            "type": "subordinados",
+            "members": [dict(r) for r in rows]
+        }
+    else:
+        # Colaborador: mostra colegas com mesmo gestor
+        if not manager_key:
+            return {"type": "equipe", "members": []}
+
+        rows = db.execute(
+            """SELECT key, name, role, dept, photo_url, org_position
+               FROM users
+               WHERE manager_key=%s AND key != %s
+               ORDER BY name""",
+            (manager_key, target_key)
+        ).fetchall()
+        return {
+            "type": "equipe",
+            "members": [dict(r) for r in rows]
+        }
+
+
+@app.put("/api/users/set-org-position")
+def set_org_position(body: SetOrgPositionRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    """
+    Admin define a posição organizacional de um usuário.
+    Valores: 'colaborador' | 'lider' | 'gestor'
+    """
+    _require_admin(user)
+
+    if body.org_position not in ("colaborador", "lider", "gestor"):
+        raise HTTPException(status_code=400, detail="org_position inválido. Use: colaborador, lider ou gestor.")
+
+    target = db.execute("SELECT * FROM users WHERE key=%s", (body.target_user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    db.execute(
+        "UPDATE users SET org_position=%s WHERE key=%s",
+        (body.org_position, body.target_user_key)
+    )
+    db.commit()
+
+    log_action(
+        db, user["key"], body.target_user_key,
+        "Posição Organizacional",
+        f"org_position definido como: {body.org_position}"
+    )
+    return {"ok": True}
