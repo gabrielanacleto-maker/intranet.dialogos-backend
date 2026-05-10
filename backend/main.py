@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 import os, uuid, shutil, datetime, json
+from html import escape
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -94,6 +95,9 @@ def log_action(db, actor_key, target_key, action_type, details=""):
             datetime.datetime.utcnow().isoformat()
         )
     )
+
+def sanitize_about_me(raw: str) -> str:
+    return escape((raw or "")[:20000], quote=False)
 
 
 def extract_room_id(channel_value: str | None):
@@ -253,6 +257,13 @@ def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user), d
     db.execute("UPDATE users SET photo_url=%s WHERE key=%s", (url, user["key"]))
     db.commit()
     return {"url": url}
+
+@app.patch("/api/users/me/about")
+def update_my_about(body: AboutMeRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    about_me = sanitize_about_me(body.about_me)
+    db.execute("UPDATE users SET about_me=%s WHERE key=%s", (about_me, user["key"]))
+    db.commit()
+    return {"about_me": about_me}
 
 # ── SECURITY LOGS ─────────────────────────────────────────────────────────────
 
