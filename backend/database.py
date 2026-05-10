@@ -62,6 +62,8 @@ def init_db():
     c = conn.cursor()
 
     try:
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS about_me TEXT DEFAULT ''")
+
         c.execute("SELECT 1 FROM users WHERE key=%s", ('gabriel',))
         if not c.fetchone():
             c.execute("""INSERT INTO users

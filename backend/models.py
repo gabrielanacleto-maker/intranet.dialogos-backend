@@ -108,6 +108,9 @@ class MoodRequest(BaseModel):
 class PointsRequest(BaseModel):
     points: int
 
+class AboutMeRequest(BaseModel):
+    about_me: str = ""
+
 class OrgEntry(BaseModel):
     user_key: str
     parent_key: str = ""
