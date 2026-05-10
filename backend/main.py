@@ -104,8 +104,7 @@ def extract_room_id(channel_value: str | None):
     return None
 
 def can_access_social_room(db, room_id: str, user):
-    room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,))
-    user = db.fetchone()
+    room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,)).fetchone()
     if not room:
         return False, None
     room_dict = dict(room)
@@ -116,8 +115,7 @@ def can_access_social_room(db, room_id: str, user):
     member = db.execute(
         "SELECT 1 FROM social_room_members WHERE room_id=%s AND user_key=%s",
         (room_id, user["key"])
-    )
-    user = db.fetchone()
+    ).fetchone()
     return bool(member), room_dict
 
 # ── AUTH ──────────────────────────────────────────────────────────────────────
@@ -1643,6 +1641,7 @@ def get_user_manager(target_key: str, user=Depends(get_current_user), db=Depends
     return {"manager": dict(manager) if manager else None}
 
 
+@app.put("/api/users/manager/assign")
 @app.put("/api/users/assign-manager")
 def assign_manager(body: AssignManagerRequest, user=Depends(get_current_user), db=Depends(get_db)):
     """
@@ -1721,6 +1720,7 @@ def get_user_team(target_key: str, user=Depends(get_current_user), db=Depends(ge
         }
 
 
+@app.put("/api/users/org-position")
 @app.put("/api/users/set-org-position")
 def set_org_position(body: SetOrgPositionRequest, user=Depends(get_current_user), db=Depends(get_db)):
     """
