@@ -6,6 +6,9 @@ from contextlib import asynccontextmanager
 import os, uuid, shutil, datetime, json
 from html import escape
 from pathlib import Path
+from fastapi.responses import Response
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 from pydantic import BaseModel
 
@@ -349,6 +352,7 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
                         ntype="mention", target_user_key=target["key"],
                         sender_key=user["key"], sender_name=user["name"],
                         reference_id=post_id, play_sound=True)
+        _notify_mentions(db, body.text, user, post_id, "uma publicação")
         db.commit()
         return {"ok": True, "id": post_id}
     except Exception as e:
@@ -437,6 +441,7 @@ def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_use
                     ntype="mention", target_user_key=target["key"],
                     sender_key=user["key"], sender_name=user["name"],
                     reference_id=post_id, play_sound=True)
+    _notify_mentions(db, body.text, user, post_id, "um comentário")
     db.commit()
     return {"comments": comments}
 
@@ -883,8 +888,29 @@ def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(req
 
 @app.get("/api/ranking")
 def get_ranking(user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute("SELECT key, name, initials, color, level, points FROM users ORDER BY points DESC").fetchall()
-    return [dict(r) for r in rows]
+    rows = db.execute("""
+        SELECT key, name, initials, color, role, dept, photo_url, points,
+               ROW_NUMBER() OVER (ORDER BY points DESC, name ASC) as position
+        FROM users ORDER BY points DESC, name ASC
+    """).fetchall()
+    ranked = [dict(r) for r in rows]
+    my_rank = next((r for r in ranked if r["key"] == user["key"]), None)
+    return {"top10": ranked[:10], "myRank": my_rank, "totalUsers": len(ranked)}
+
+@app.get("/api/giphy/search")
+def search_giphy(q: str, user=Depends(get_current_user)):
+    api_key = os.getenv("GIPHY_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="GIPHY_API_KEY não configurada.")
+    query = (q or "").strip()[:80]
+    if not query:
+        return {"gifs": []}
+    url = "https://api.giphy.com/v1/gifs/search?" + urlencode({
+        "api_key": api_key, "q": query, "limit": 12, "rating": "pg-13", "lang": "pt"
+    })
+    with urlopen(url, timeout=8) as res:
+        data = json.loads(res.read().decode("utf-8"))
+    return {"gifs": [{"id": g["id"], "url": g["images"]["fixed_height"]["url"], "title": g.get("title", "")} for g in data.get("data", [])]}
 
 @app.put("/api/users/{target_key}/points")
 def update_points(target_key: str, body: PointsRequest, user=Depends(require_level(2)), db=Depends(get_db)):
@@ -929,6 +955,49 @@ def get_mood_history(user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute("SELECT * FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 30",
                       (user["key"],)).fetchall()
     return [dict(r) for r in rows]
+
+def _simple_pdf(title: str, lines: list[str]) -> bytes:
+    content = ["BT", "/F1 18 Tf", "50 790 Td", f"({title}) Tj", "/F1 10 Tf"]
+    y = 0
+    for line in lines[:45]:
+        safe = str(line).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")[:110]
+        content += ["0 -16 Td", f"({safe}) Tj"]
+        y += 1
+    content.append("ET")
+    stream = "\n".join(content).encode("latin-1", "replace")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for idx, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf += f"{idx} 0 obj\n".encode() + obj + b"\nendobj\n"
+    xref = len(pdf)
+    pdf += f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n".encode()
+    for off in offsets[1:]:
+        pdf += f"{off:010d} 00000 n \n".encode()
+    pdf += f"trailer << /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    return bytes(pdf)
+
+@app.get("/api/mood/report.pdf")
+def get_mood_report_pdf(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("SELECT * FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 120",
+                      (user["key"],)).fetchall()
+    lines = [
+        f"Data: {datetime.datetime.utcnow().strftime('%d/%m/%Y')}",
+        f"Colaborador: {user['name']}",
+        f"Total de registros: {len(rows)}",
+        "",
+    ]
+    for r in rows:
+        lines.append(f"{r['created_at'][:10]} | {r['mood']} | intensidade {r.get('intensity') or ''} | {r.get('reason') or ''}")
+    return Response(_simple_pdf("Relatorio de Humor", lines), media_type="application/pdf",
+                    headers={"Content-Disposition": "attachment; filename=relatorio-humor.pdf"})
 
 @app.post("/api/mood/reset")
 def reset_mood(user=Depends(get_current_user), db=Depends(get_db)):
@@ -1516,9 +1585,25 @@ def _notify(db, *, title: str, message: str, ntype: str,
 
 
 def _extract_mentions(text: str):
-    """Return list of @keys found in text."""
+    """Return list of @keys or @first_name found in text."""
     import re
-    return re.findall(r'@([A-Za-z0-9_]+)', text or '')
+    return re.findall(r'@([A-Za-z0-9_.-]+)', text or '')
+
+def _notify_mentions(db, text: str, actor: dict, reference_id: str, context: str):
+    for mention in set(_extract_mentions(text)):
+        token = mention.lower()
+        target = db.execute(
+            """SELECT key, name FROM users
+               WHERE lower(key)=%s OR lower(split_part(name, ' ', 1))=%s
+               LIMIT 1""",
+            (token, token)
+        ).fetchone()
+        if target and target["key"] != actor["key"]:
+            _notify(db, title="Você foi mencionado",
+                    message=f"{actor['name']} te mencionou em {context}",
+                    ntype="mention", target_user_key=target["key"],
+                    sender_key=actor["key"], sender_name=actor["name"],
+                    reference_id=reference_id, play_sound=True)
 
 
 # ── GET notifications ─────────────────────────────────────────────────────────
