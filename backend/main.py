@@ -547,19 +547,26 @@ def upload_folder_file(
         raise HTTPException(status_code=403)
     if file.size and file.size > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Arquivo muito grande (máx 50MB)")
-    fname = f"doc_{uuid.uuid4().hex[:12]}_{file.filename}"
-    path = UPLOAD_DIR / fname
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    file_id = str(uuid.uuid4())
-    db.execute("""INSERT INTO folder_files (id, folder_id, name, url, size, mime_type, uploaded_by, created_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (file_id, folder_id, file.filename, f"/uploads/{fname}",
-        os.path.getsize(path), file.content_type or "",
-        user["name"], datetime.datetime.utcnow().isoformat())
-    )
-    db.commit()
-    return {"ok": True, "url": f"/uploads/{fname}"}
+    
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="dialogos/folders",
+            resource_type="auto"
+        )
+        url = result["secure_url"]
+        
+        file_id = str(uuid.uuid4())
+        db.execute("""INSERT INTO folder_files (id, folder_id, name, url, size, mime_type, uploaded_by, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (file_id, folder_id, file.filename, url,
+            file.size or 0, file.content_type or "",
+            user["name"], datetime.datetime.utcnow().isoformat())
+        )
+        db.commit()
+        return {"ok": True, "url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/folders/{folder_id}/files/{file_id}")
 def delete_folder_file(folder_id: str, file_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
@@ -787,27 +794,32 @@ def upload_social_room_file(
     if file.size and file.size > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Arquivo muito grande (máx 50MB)")
 
-    fname = f"sala_{room_id}_{uuid.uuid4().hex[:10]}_{file.filename}"
-    path = UPLOAD_DIR / fname
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    file_id = str(uuid.uuid4())
-    db.execute("""INSERT INTO social_room_files (id, room_id, name, url, size, mime_type, uploaded_by, created_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (
-            file_id,
-            room_id,
-            file.filename,
-            f"/uploads/{fname}",
-            os.path.getsize(path),
-            file.content_type or "",
-            user["name"],
-            datetime.datetime.utcnow().isoformat()
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder=f"dialogos/social_rooms/{room_id}",
+            resource_type="auto"
         )
-    )
-    db.commit()
-    return {"ok": True, "id": file_id, "url": f"/uploads/{fname}"}
+        url = result["secure_url"]
+
+        file_id = str(uuid.uuid4())
+        db.execute("""INSERT INTO social_room_files (id, room_id, name, url, size, mime_type, uploaded_by, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                file_id,
+                room_id,
+                file.filename,
+                url,
+                file.size or 0,
+                file.content_type or "",
+                user["name"],
+                datetime.datetime.utcnow().isoformat()
+            )
+        )
+        db.commit()
+        return {"ok": True, "id": file_id, "url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/social-rooms/{room_id}/files/{file_id}")
 def delete_social_room_file(room_id: str, file_id: str, user=Depends(get_current_user), db=Depends(get_db)):
