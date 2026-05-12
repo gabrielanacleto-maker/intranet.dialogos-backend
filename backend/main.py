@@ -244,17 +244,20 @@ def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user), d
     if ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
         raise HTTPException(status_code=400, detail="Formato invalido. Use JPG, PNG ou WEBP.")
 
-    result = cloudinary.uploader.upload(
-        file.file,
-        folder="dialogos/fotos",
-        public_id=f"photo_{user['key']}",
-        overwrite=True
-    )
-    url = result["secure_url"]
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="dialogos/fotos",
+            public_id=f"photo_{user['key']}",
+            overwrite=True
+        )
+        url = result["secure_url"]
 
-    db.execute("UPDATE users SET photo_url=%s WHERE key=%s", (url, user["key"]))
-    db.commit()
-    return {"url": url}
+        db.execute("UPDATE users SET photo_url=%s WHERE key=%s", (url, user["key"]))
+        db.commit()
+        return {"url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/mural/{item_id}")
 def delete_mural(item_id: str, user=Depends(get_current_user), db=Depends(get_db)):
