@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
-import os, uuid, shutil, datetime, json
+import os, uuid, shutil, datetime, json, re, time
+from urllib.parse import urlparse
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -18,6 +19,92 @@ import cloudinary.uploader
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+ALLOWED_VIDEO_MIMES = {"video/mp4", "video/quicktime", "video/webm"}
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
+MAX_IMAGE_SIZE = 10 * 1024 * 1024
+MAX_VIDEO_SIZE = 50 * 1024 * 1024
+TRUSTED_EMBED_DOMAINS = {"instagram.com", "tiktok.com", "youtube.com", "youtu.be", "twitter.com", "x.com", "spotify.com", "wa.me", "whatsapp.com"}
+
+# Simple in-memory rate limiting
+_upload_limits = {}
+
+def _check_upload_rate_limit(user_key: str):
+    now = time.time()
+    minute = int(now / 60)
+    key = f"{user_key}:{minute}"
+    count = _upload_limits.get(key, 0)
+    if count >= 10:
+        raise HTTPException(status_code=429, detail="Limite de uploads excedido. Tente novamente em 1 minuto.")
+    _upload_limits[key] = count + 1
+
+def _sanitize_text(text: str) -> str:
+    if not text:
+        return ""
+    dangerous = [
+        r'<script[\s\S]*?>[\s\S]*?</script>', r'<iframe[\s\S]*?>', r'<object[\s\S]*?>',
+        r'<embed[\s\S]*?>', r'javascript:', r'onerror\s*=', r'onclick\s*=',
+        r'onload\s*=', r'eval\s*\(', r'Function\s*\(', r'document\.cookie',
+        r'window\.location', r'innerHTML',
+    ]
+    for pattern in dangerous:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '', text)
+    return text.strip()[:5000]
+
+def _validate_embed_url(url: str) -> str:
+    if not url:
+        return url
+    try:
+        u = url.strip()
+        parsed = urlparse(u)
+        if not parsed.netloc:
+            raise ValueError("URL inválida")
+        domain = parsed.netloc.lower()
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        is_trusted = any(trusted in domain or domain.endswith('.' + trusted) for trusted in TRUSTED_EMBED_DOMAINS)
+        if not is_trusted:
+            raise ValueError("Domínio não permitido para embed")
+        return u
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"URL de embed não permitida: {str(e)}")
+
+def _validate_upload_file(file: UploadFile):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Arquivo sem nome")
+
+    ext = Path(file.filename).suffix.lower()
+    mime = file.content_type or ""
+
+    if ext in ALLOWED_IMAGE_EXTENSIONS:
+        if mime and mime not in ALLOWED_IMAGE_MIMES:
+            raise HTTPException(status_code=400, detail="Tipo MIME inválido para imagem")
+        max_size = MAX_IMAGE_SIZE
+    elif ext in ALLOWED_VIDEO_EXTENSIONS:
+        if mime and mime not in ALLOWED_VIDEO_MIMES:
+            raise HTTPException(status_code=400, detail="Tipo MIME inválido para vídeo")
+        max_size = MAX_VIDEO_SIZE
+    else:
+        raise HTTPException(status_code=400, detail=f"Extensão {ext} não permitida. Use: JPG, PNG, WEBP, GIF, MP4, MOV, WEBM")
+
+    if ext in ALLOWED_IMAGE_EXTENSIONS and mime and mime not in ALLOWED_IMAGE_MIMES:
+        raise HTTPException(status_code=400, detail="Tipo de arquivo inválido (MIME mismatch)")
+    if ext in ALLOWED_VIDEO_EXTENSIONS and mime and mime not in ALLOWED_VIDEO_MIMES:
+        raise HTTPException(status_code=400, detail="Tipo de arquivo inválido (MIME mismatch)")
+
+    if file.size and file.size > max_size:
+        size_mb = max_size / (1024 * 1024)
+        raise HTTPException(status_code=400, detail=f"Arquivo muito grande (máx {int(size_mb)}MB)")
+
+    return ext, max_size
+
+def _is_executable(ext: str) -> bool:
+    return ext in {".exe", ".bat", ".cmd", ".sh", ".ps1", ".vbs", ".scr", ".com", ".msi", ".dll", ".jar", ".py", ".js", ".php", ".pl", ".rb", ".asp", ".aspx", ".jsp"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -263,16 +350,18 @@ def delete_user(target_key: str, user=Depends(require_level(2)), db=Depends(get_
 
 @app.post("/api/users/me/photo")
 def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user), db=Depends(get_db)):
-    ext = Path(file.filename or "foto.jpg").suffix.lower()
-    if ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
+    _check_upload_rate_limit(user["key"])
+    ext, _ = _validate_upload_file(file)
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Formato invalido. Use JPG, PNG ou WEBP.")
 
     try:
+        unique_id = str(uuid.uuid4())
         result = cloudinary.uploader.upload(
             file.file,
             folder="dialogos/fotos",
-            public_id=f"photo_{user['key']}",
-            overwrite=True
+            public_id=f"photo_{user['key']}_{unique_id}",
+            overwrite=False
         )
         url = result["secure_url"]
 
@@ -338,11 +427,22 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
                         user["level"] in ["platina", "diamante"])
             if not can_post:
                 raise HTTPException(status_code=403, detail="Sem permissão para publicar no Feed Novidades.")
+
+        safe_text = _sanitize_text(body.text or "")
+        safe_embed = _validate_embed_url(body.embed_url) if body.embed_url else ""
+        safe_image = body.image_url or ""
+        safe_video = body.video_url or ""
+        if safe_image and not safe_image.startswith("http"):
+            safe_image = ""
+        if safe_video and not safe_video.startswith("http"):
+            safe_video = ""
+
         post_id = str(uuid.uuid4())
         db.execute("""INSERT INTO posts
     (id, feed, author_key, author_name, author_initials, author_color, author_photo_url,
-    text, image_url, embed_url, access_level, comunicado_tipo, pinned, likes, comments, created_at)
-    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+    author_role, author_is_rh, author_is_admin,
+    text, image_url, video_url, embed_url, access_level, comunicado_tipo, pinned, likes, comments, created_at)
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
     (
         post_id,
         body.feed,
@@ -351,9 +451,13 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
         user["initials"],
         user["color"],
         user.get("photo_url", ""),
-        body.text,
-        body.image_url or "",
-        body.embed_url or "",
+        user.get("role", ""),
+        1 if user.get("is_rh") else 0,
+        1 if user.get("is_admin") else 0,
+        safe_text,
+        safe_image,
+        safe_video,
+        safe_embed,
         body.access_level,
         body.comunicado_tipo,
         0,
@@ -390,16 +494,37 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
 
 @app.post("/api/posts/upload-image")
 def upload_post_image(file: UploadFile = File(...), user=Depends(get_current_user)):
-    if file.size and file.size > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Imagem muito grande (máx 10MB)")
-    if Path(file.filename).suffix.lower() not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
-        raise HTTPException(status_code=400, detail="Formato inválido")
+    _check_upload_rate_limit(user["key"])
+    ext, _ = _validate_upload_file(file)
+
+    resource_type = "video" if ext in ALLOWED_VIDEO_EXTENSIONS else "image"
+    folder = "dialogos/posts"
+
+    unique_name = f"{uuid.uuid4()}{ext}"
+
     result = cloudinary.uploader.upload(
         file.file,
-        folder="dialogos/posts",
-        resource_type="image"
+        folder=folder,
+        public_id=unique_name.replace(ext, ""),
+        resource_type=resource_type
     )
-    return {"url": result["secure_url"]}
+    return {"url": result["secure_url"], "resource_type": resource_type}
+
+@app.post("/api/posts/upload-video")
+def upload_post_video(file: UploadFile = File(...), user=Depends(get_current_user)):
+    _check_upload_rate_limit(user["key"])
+    ext, _ = _validate_upload_file(file)
+    if ext not in ALLOWED_VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Formato de vídeo não permitido. Use MP4, MOV ou WEBM")
+
+    unique_name = f"{uuid.uuid4()}{ext}"
+    result = cloudinary.uploader.upload(
+        file.file,
+        folder="dialogos/posts/videos",
+        public_id=unique_name.replace(ext, ""),
+        resource_type="video"
+    )
+    return {"url": result["secure_url"], "resource_type": "video"}
 
 @app.delete("/api/posts/{post_id}")
 def delete_post(post_id: str, user=Depends(get_current_user), db=Depends(get_db)):
@@ -450,6 +575,9 @@ def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_use
     post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
     if not post:
         raise HTTPException(status_code=404)
+    safe_text = _sanitize_text(body.text or "")
+    if not safe_text.strip():
+        raise HTTPException(status_code=400, detail="Comentário não pode ser vazio")
     comments = json.loads(post["comments"] or "[]")
     comments.append({
         "id": str(uuid.uuid4())[:8],
@@ -458,7 +586,9 @@ def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_use
         "author_initials": user["initials"],
         "author_color": user.get("color", "av-gold"),
         "author_photo_url": user.get("photo_url", ""),
-        "text": body.text,
+        "author_role": user.get("role", ""),
+        "author_is_rh": user.get("is_rh", False),
+        "text": safe_text,
         "created_at": datetime.datetime.utcnow().isoformat()
     })
     db.execute("UPDATE posts SET comments=%s WHERE id=%s", (json.dumps(comments), post_id))
@@ -524,16 +654,16 @@ def upload_mural_image(
     if not can_post:
         raise HTTPException(status_code=403)
 
-    allowed = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
-    ext = Path(file.filename).suffix.lower()
+    _check_upload_rate_limit(user["key"])
+    ext, max_size = _validate_upload_file(file)
 
-    if ext not in allowed:
-        raise HTTPException(status_code=400, detail="Formato inválido")
+    unique_name = f"{uuid.uuid4()}{ext}"
 
     try:
         result = cloudinary.uploader.upload(
             file.file,
-            folder="mural"
+            folder="mural",
+            public_id=unique_name.replace(ext, "")
         )
 
         return {
@@ -590,13 +720,17 @@ def upload_folder_file(
 ):
     if user["access_level"] < 2:
         raise HTTPException(status_code=403)
-    if file.size and file.size > 50 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Arquivo muito grande (máx 50MB)")
+    _check_upload_rate_limit(user["key"])
+    ext = Path(file.filename).suffix.lower()
+    if _is_executable(ext):
+        raise HTTPException(status_code=400, detail="Arquivos executáveis não são permitidos")
     
     try:
+        unique_name = f"{uuid.uuid4()}{ext}"
         result = cloudinary.uploader.upload(
             file.file,
             folder="dialogos/folders",
+            public_id=unique_name.replace(ext, ""),
             resource_type="auto"
         )
         url = result["secure_url"]
@@ -861,13 +995,17 @@ def upload_social_room_file(
     allowed, _ = can_access_social_room(db, room_id, user)
     if not allowed:
         raise HTTPException(status_code=403, detail="Sem acesso a esta sala.")
-    if file.size and file.size > 50 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Arquivo muito grande (máx 50MB)")
+    _check_upload_rate_limit(user["key"])
+    ext = Path(file.filename).suffix.lower()
+    if _is_executable(ext):
+        raise HTTPException(status_code=400, detail="Arquivos executáveis não são permitidos")
 
     try:
+        unique_name = f"{uuid.uuid4()}{ext}"
         result = cloudinary.uploader.upload(
             file.file,
             folder=f"dialogos/social_rooms/{room_id}",
+            public_id=unique_name.replace(ext, ""),
             resource_type="auto"
         )
         url = result["secure_url"]
@@ -1440,24 +1578,6 @@ def _ensure_feedback_tables(db):
             created_at TEXT NOT NULL
         )
     """)
-
-
-def _sanitize_text(text: str) -> str:
-    """Strip dangerous HTML/JS patterns from user input."""
-    import re
-    if not text:
-        return ""
-    dangerous = [
-        r'<script[\s\S]*?>[\s\S]*?</script>', r'<iframe[\s\S]*?>', r'<object[\s\S]*?>',
-        r'<embed[\s\S]*?>', r'javascript:', r'onerror\s*=', r'onclick\s*=',
-        r'onload\s*=', r'eval\s*\(', r'Function\s*\(', r'document\.cookie',
-        r'window\.location', r'innerHTML',
-    ]
-    for pattern in dangerous:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-    # Strip all HTML tags
-    text = re.sub(r'<[^>]+>', '', text)
-    return text.strip()[:2000]
 
 
 def _can_evaluate(user: dict) -> bool:
