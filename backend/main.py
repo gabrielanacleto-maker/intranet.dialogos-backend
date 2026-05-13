@@ -142,6 +142,19 @@ def login(body: LoginRequest, db=Depends(get_db)):
             }
         }
 
+@app.get("/api/auth/me")
+def auth_me(user=Depends(get_current_user)):
+    return {
+        "key": user["key"], "name": user["name"], "initials": user["initials"],
+        "role": user["role"], "dept": user["dept"], "level": user["level"],
+        "color": user["color"], "access_level": user["access_level"],
+        "is_admin": user["is_admin"], "is_admin_user": user["is_admin_user"],
+        "is_rh": user["is_rh"], "is_ouvidor": user["is_ouvidor"],
+        "is_orcoma": user["is_orcoma"],
+        "points": user["points"], "photo_url": user["photo_url"],
+        "password_changed": user["password_changed"],
+    }
+
 @app.post("/api/auth/change-password")
 def change_password(body: ChangePasswordRequest, user=Depends(get_current_user), db=Depends(get_db)):
         if not check_password(body.current_password, user["password_hash"]):
