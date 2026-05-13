@@ -63,6 +63,10 @@ def init_db():
 
     try:
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS about_me TEXT DEFAULT ''")
+        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url TEXT DEFAULT ''")
+        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_role TEXT DEFAULT ''")
+        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_rh INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_admin INTEGER DEFAULT 0")
 
         c.execute("SELECT 1 FROM users WHERE key=%s", ('gabriel',))
         if not c.fetchone():

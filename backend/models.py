@@ -52,6 +52,7 @@ class CreatePostRequest(BaseModel):
     feed: str = "feed"
     text: str
     image_url: Optional[str] = None
+    video_url: Optional[str] = None
     embed_url: Optional[str] = None
     access_level: str = "all"
     comunicado_tipo: Optional[str] = None
