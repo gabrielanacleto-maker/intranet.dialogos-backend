@@ -129,6 +129,11 @@ def login(body: LoginRequest, db=Depends(get_db)):
         if not user or not check_password(body.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
         token = create_token({"sub": user["key"], "level": user["access_level"]})
+        _notify(db, title="🔐 Login realizado",
+                message=f"{user['name']} fez login no sistema",
+                ntype="system", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                play_sound=False)
         return {
             "token": token,
             "must_change_password": not user["password_changed"],
@@ -200,6 +205,11 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
         )
         db.commit()
         log_action(db, user["key"], key, "Criação de Usuário", f"Criou usuário {body.name}")
+        _notify(db, title="👤 Novo colaborador",
+                message=f"{user['name']} criou o usuário {body.name} ({body.role})",
+                ntype="system", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=key, play_sound=True)
         return {"ok": True}
 
 @app.put("/api/users/{target_key}")
@@ -268,6 +278,11 @@ def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user), d
 
         db.execute("UPDATE users SET photo_url=%s WHERE key=%s", (url, user["key"]))
         db.commit()
+        _notify(db, title="📸 Foto atualizada",
+                message=f"{user['name']} atualizou sua foto de perfil",
+                ntype="system", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                play_sound=False)
         return {"url": url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -413,11 +428,20 @@ def toggle_like(post_id: str, user=Depends(get_current_user), db=Depends(get_db)
     if not post:
         raise HTTPException(status_code=404)
     likes = json.loads(post["likes"] or "[]")
+    is_new_like = user["key"] not in likes
     if user["key"] in likes:
         likes.remove(user["key"])
     else:
         likes.append(user["key"])
     db.execute("UPDATE posts SET likes=%s WHERE id=%s", (json.dumps(likes), post_id))
+    # Notify post author on like
+    post_dict = dict(post)
+    if is_new_like and post_dict.get("author_key") and post_dict["author_key"] != user["key"]:
+        _notify(db, title="👍 Nova curtida",
+                message=f"{user['name']} curtiu sua publicação",
+                ntype="post", target_user_key=post_dict["author_key"],
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=post_id, play_sound=True)
     db.commit()
     return {"likes": likes}
 
@@ -477,6 +501,11 @@ def create_mural(body: MuralItemRequest, user=Depends(get_current_user), db=Depe
         (item_id, body.tag, body.title, body.subtitle, body.content,
         body.image_url or "", datetime.datetime.utcnow().isoformat())
     )
+    _notify(db, title="🖼️ Novo mural",
+            message=f"{user['name']} publicou no mural: {body.title or '(sem título)'}",
+            ntype="post", audience="all",
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=item_id, play_sound=True)
     db.commit()
     return {"ok": True, "id": item_id}
 
@@ -579,6 +608,13 @@ def upload_folder_file(
             file.size or 0, file.content_type or "",
             user["name"], datetime.datetime.utcnow().isoformat())
         )
+        folder_name = db.execute("SELECT name FROM folders WHERE id=%s", (folder_id,)).fetchone()
+        fname = folder_name["name"] if folder_name else "documentos"
+        _notify(db, title="📎 Arquivo enviado",
+                message=f"{user['name']} enviou {file.filename} para {fname}",
+                ntype="system", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=file_id, play_sound=False)
         db.commit()
         return {"ok": True, "url": url}
     except Exception as e:
@@ -642,6 +678,19 @@ def send_chat_message(body: ChatMessageRequest, user=Depends(get_current_user), 
                     ntype="mention", target_user_key=target["key"],
                     sender_key=user["key"], sender_name=user["name"],
                     reference_id=mid, play_sound=True)
+    # Notify social room members about new message (non-mention)
+    social_room_id = extract_room_id(body.room_id)
+    if social_room_id:
+        members = db.execute(
+            "SELECT user_key FROM social_room_members WHERE room_id=%s AND user_key!=%s",
+            (social_room_id, user["key"])
+        ).fetchall()
+        for m in members:
+            _notify(db, title="💬 Nova mensagem na sala",
+                    message=f"{user['name']}: {(body.text or '')[:80]}",
+                    ntype="comment", target_user_key=m["user_key"],
+                    sender_key=user["key"], sender_name=user["name"],
+                    reference_id=mid, play_sound=False)
     db.commit()
     return {"ok": True, "id": mid}
 
@@ -768,6 +817,11 @@ def add_social_room_member(room_id: str, target_key: str, user=Depends(get_curre
         datetime.datetime.utcnow().isoformat()
     )
     )
+    _notify(db, title="👋 Você foi adicionado a uma sala",
+            message=f"{user['name']} adicionou você à sala {room['name']}",
+            ntype="system", target_user_key=k,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=room_id, play_sound=True)
     db.commit()
     return {"ok": True}
 
@@ -898,6 +952,14 @@ def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(req
         "created_at": datetime.datetime.utcnow().isoformat()
     })
     db.execute("UPDATE ouvidoria SET responses=%s WHERE id=%s", (json.dumps(responses), oid))
+    # Notify original author
+    ouid_full = db.execute("SELECT author_key FROM ouvidoria WHERE id=%s", (oid,)).fetchone()
+    if ouid_full and ouid_full["author_key"] != user["key"]:
+        _notify(db, title="📬 Ouvidoria respondida",
+                message=f"{user['name']} respondeu sua manifestação",
+                ntype="system", target_user_key=ouid_full["author_key"],
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=oid, play_sound=True)
     db.commit()
     return {"ok": True}
 
@@ -905,12 +967,30 @@ def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(req
 
 @app.get("/api/ranking")
 def get_ranking(user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute("SELECT key, name, initials, color, level, points FROM users ORDER BY points DESC").fetchall()
-    return [dict(r) for r in rows]
+    rows = db.execute("SELECT key, name, initials, color, level, role, dept, points, photo_url FROM users ORDER BY points DESC").fetchall()
+    all_users = [dict(r) for r in rows]
+    total = len(all_users)
+    my_position = next((i+1 for i, u in enumerate(all_users) if u["key"] == user["key"]), None)
+    top10 = []
+    for i, u in enumerate(all_users[:10], 1):
+        entry = dict(u)
+        entry["position"] = i
+        top10.append(entry)
+    return {
+        "top10": top10,
+        "myRank": {"position": my_position} if my_position else None,
+        "totalUsers": total
+    }
 
 @app.put("/api/users/{target_key}/points")
 def update_points(target_key: str, body: PointsRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    target = db.execute("SELECT name FROM users WHERE key=%s", (target_key,)).fetchone()
     db.execute("UPDATE users SET points=%s WHERE key=%s", (body.points, target_key))
+    _notify(db, title="📊 Pontos atualizados",
+            message=f"Seus pontos foram atualizados para {body.points} por {user['name']}",
+            ntype="xp", target_user_key=target_key,
+            sender_key=user["key"], sender_name=user["name"],
+            play_sound=True)
     db.commit()
     return {"ok": True}
 
@@ -1084,6 +1164,11 @@ def add_points(user_key: str, points: int, reason: str, action_type: str, user=D
     new_total = current_points + points
     db.execute("UPDATE users SET points=%s WHERE key=%s", (new_total, user_key))
 
+    _notify(db, title="💰 Pontos recebidos",
+            message=f"Você recebeu {points} pontos por: {reason}",
+            ntype="xp", target_user_key=user_key,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=point_id, play_sound=True)
     db.commit()
     return {"ok": True, "new_total": new_total, "points_added": points}
 
@@ -1125,6 +1210,11 @@ def award_badge(user_key: str, badge_type: str, badge_name: str, description: st
         (badge_id, user_key, badge_type, badge_name, description, icon, datetime.datetime.utcnow().isoformat())
     )
 
+    _notify(db, title="🏅 Nova badge!",
+            message=f"Você recebeu a badge {badge_name}: {description}",
+            ntype="system", target_user_key=user_key,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=badge_id, play_sound=True)
     db.commit()
     return {"ok": True, "badge_id": badge_id}
 
@@ -1253,6 +1343,11 @@ def unlock_achievement(user_key: str, achievement_type: str, achievement_name: s
         (achievement_id, user_key, achievement_type, achievement_name, description, icon, datetime.datetime.utcnow().isoformat())
     )
 
+    _notify(db, title="🏆 Conquista desbloqueada!",
+            message=f"Você desbloqueou a conquista {achievement_name}: {description}",
+            ntype="system", target_user_key=user_key,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=achievement_id, play_sound=True)
     db.commit()
     return {"ok": True, "achievement_id": achievement_id}
 
