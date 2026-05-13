@@ -63,6 +63,8 @@ def init_db():
 
     try:
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS about_me TEXT DEFAULT ''")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_diretor INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_leader INTEGER DEFAULT 0")
         c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url TEXT DEFAULT ''")
         c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_role TEXT DEFAULT ''")
         c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_rh INTEGER DEFAULT 0")
@@ -84,11 +86,11 @@ def init_db():
         if not c.fetchone():
             c.execute("""INSERT INTO users
                 (key, name, initials, role, dept, level, color, access_level,
-                 is_admin, is_admin_user, is_rh, is_ouvidor, points, password_hash, password_changed)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                 is_admin, is_admin_user, is_rh, is_ouvidor, is_diretor, is_leader, points, password_hash, password_changed)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 ('tairla', 'Tairla Andrade Carvalho Mascarenhas', 'TA',
                  'Diretora', 'Administrativo & User Adm',
-                 'diamante', 'av-teal', 2, 0, 1, 1, 0, 100,
+                 'diamante', 'av-teal', 2, 0, 1, 1, 0, 1, 0, 100,
                  hash_password(DEFAULT_USER_PASSWORD), 0)
             )
 
@@ -96,11 +98,11 @@ def init_db():
         if not c.fetchone():
             c.execute("""INSERT INTO users
                 (key, name, initials, role, dept, level, color, access_level,
-                 is_admin, is_admin_user, is_rh, is_ouvidor, points, password_hash, password_changed)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                 is_admin, is_admin_user, is_rh, is_ouvidor, is_diretor, is_leader, points, password_hash, password_changed)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 ('malu', 'Maria Luiza Alves Macedo', 'MA',
                  'Líder', 'Administrativo',
-                 'platina', 'av-blue', 1, 0, 0, 0, 1, 100,
+                 'platina', 'av-blue', 1, 0, 0, 0, 1, 0, 1, 100,
                  hash_password(DEFAULT_USER_PASSWORD), 0)
             )
 

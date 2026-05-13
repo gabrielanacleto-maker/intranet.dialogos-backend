@@ -45,9 +45,14 @@ def _sanitize_text(text: str) -> str:
         return ""
     dangerous = [
         r'<script[\s\S]*?>[\s\S]*?</script>', r'<iframe[\s\S]*?>', r'<object[\s\S]*?>',
-        r'<embed[\s\S]*?>', r'javascript:', r'onerror\s*=', r'onclick\s*=',
-        r'onload\s*=', r'eval\s*\(', r'Function\s*\(', r'document\.cookie',
-        r'window\.location', r'innerHTML',
+        r'<embed[\s\S]*?>', r'<svg[\s\S]*?>', r'<style[\s\S]*?>',
+        r'javascript:', r'data:', r'vbscript:',
+        r'onerror\s*=', r'onclick\s*=', r'onload\s*=', r'onmouseover\s*=',
+        r'onsubmit\s*=', r'onfocus\s*=', r'onchange\s*=', r'oninput\s*=',
+        r'eval\s*\(', r'Function\s*\(', r'document\.cookie',
+        r'window\.location', r'innerHTML', r'outerHTML',
+        r'fetch\s*\(', r'XMLHttpRequest', r'new\s+Function',
+        r'alert\s*\(', r'prompt\s*\(', r'confirm\s*\(',
     ]
     for pattern in dangerous:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE)
@@ -230,6 +235,7 @@ def login(body: LoginRequest, db=Depends(get_db)):
                 "color": user["color"], "access_level": user["access_level"],
                 "is_admin": user["is_admin"], "is_admin_user": user["is_admin_user"],
                 "is_rh": user["is_rh"], "is_ouvidor": user["is_ouvidor"],
+                "is_diretor": user["is_diretor"], "is_leader": user["is_leader"],
                 "points": user["points"], "photo_url": user["photo_url"],
             }
         }
@@ -242,6 +248,7 @@ def auth_me(user=Depends(get_current_user)):
         "color": user["color"], "access_level": user["access_level"],
         "is_admin": user["is_admin"], "is_admin_user": user["is_admin_user"],
         "is_rh": user["is_rh"], "is_ouvidor": user["is_ouvidor"],
+        "is_diretor": user["is_diretor"], "is_leader": user["is_leader"],
         "is_orcoma": user["is_orcoma"],
         "points": user["points"], "photo_url": user["photo_url"],
         "password_changed": user["password_changed"],
@@ -281,13 +288,14 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
             raise HTTPException(status_code=400, detail="Usuário já existe.")
         db.execute("""INSERT INTO users
             (key, name, initials, role, dept, level, color, access_level,
-            is_admin, is_admin_user, is_rh, is_ouvidor, points,
+            is_admin, is_admin_user, is_rh, is_ouvidor, is_diretor, is_leader, points,
             password_hash, password_changed, photo_url)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s)""",
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s)""",
             (key, body.name, body.initials, body.role, body.dept,
             body.level, body.color, body.access_level,
             1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
+            1 if body.is_diretor else 0, 1 if body.is_leader else 0,
             body.points, hash_password(body.password), "")
         )
         db.commit()
@@ -311,12 +319,13 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
             if user["access_level"] == 2 and target["access_level"] >= 2:
                 raise HTTPException(status_code=403, detail="Você não pode editar admins.")
         db.execute("""UPDATE users SET name=%s, initials=%s, role=%s, dept=%s, level=%s,
-            color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, points=%s
+            color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, points=%s
             WHERE key=%s""",
             (body.name, body.initials, body.role, body.dept, body.level,
             body.color, body.access_level,
             1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
+            1 if body.is_diretor else 0, 1 if body.is_leader else 0,
             body.points, target_key)
         )
         db.commit()
@@ -427,6 +436,32 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
                         user["level"] in ["platina", "diamante"])
             if not can_post:
                 raise HTTPException(status_code=403, detail="Sem permissão para publicar no Feed Novidades.")
+
+        # Server-side validation for comunicado_tipo — never trust the client
+        comunicado_tipo = body.comunicado_tipo
+        if comunicado_tipo:
+            role = (user.get("role") or "").lower()
+            is_dir_role = role in ("diretora", "diretor")
+            is_lider_role = role == "líder" or role == "lider"
+            is_diretor = user.get("is_diretor") or False
+            is_leader = user.get("is_leader") or False
+            is_rh = user.get("is_rh") or False
+            is_admin = user.get("is_admin") or False
+
+            if comunicado_tipo == "diretoria":
+                if not (is_dir_role or is_diretor or is_leader or is_admin):
+                    raise HTTPException(status_code=403, detail="Sem permissão para Comunicado da Diretoria.")
+            elif comunicado_tipo == "lideranca":
+                if not (is_lider_role or is_leader or is_admin):
+                    raise HTTPException(status_code=403, detail="Sem permissão para Comunicado da Liderança.")
+            elif comunicado_tipo == "rh":
+                if not (is_rh or is_admin):
+                    raise HTTPException(status_code=403, detail="Sem permissão para Comunicado do RH.")
+            elif comunicado_tipo == "admin":
+                if not is_admin:
+                    raise HTTPException(status_code=403, detail="Sem permissão para Comunicado Admin.")
+            else:
+                raise HTTPException(status_code=400, detail=f"Tipo de comunicado inválido: {comunicado_tipo}")
 
         safe_text = _sanitize_text(body.text or "")
         safe_embed = _validate_embed_url(body.embed_url) if body.embed_url else ""
