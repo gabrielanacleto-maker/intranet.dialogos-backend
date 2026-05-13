@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { jsPDF } from 'jspdf';
 import { api } from '../services/api';
 
 const MOODS = [
@@ -41,13 +42,53 @@ export default function MoodReport() {
   const topInfo = top ? info(top[0]) : null;
 
   async function downloadReport() {
-    const blob = await api.downloadMoodPdf();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `relatorio-humor-${selectedMonth || 'atual'}.pdf`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const doc = new jsPDF();
+    const pageW = doc.internal.pageSize.getWidth();
+    let y = 20;
+
+    doc.setFontSize(18);
+    doc.text('Relatorio de Humor', pageW / 2, y, { align: 'center' });
+    y += 10;
+
+    doc.setFontSize(10);
+    doc.text(`Periodo: ${monthLabel(selectedMonth)}`, 14, y);
+    y += 8;
+    doc.text(`Total de registros: ${total}`, 14, y);
+    y += 12;
+
+    if (topInfo) {
+      doc.setFontSize(12);
+      doc.text(`Humor dominante: ${topInfo.label} (${top[1]}x)`, 14, y);
+      y += 10;
+    }
+
+    MOODS.forEach(m => {
+      const count = counts[m.key] || 0;
+      if (!count) return;
+      const pct = Math.round((count / total) * 100);
+      doc.setFontSize(11);
+      doc.text(`${m.label}: ${count}x (${pct}%)`, 20, y);
+      y += 7;
+    });
+
+    y += 6;
+    doc.setFontSize(14);
+    doc.text('Registros individuais', 14, y);
+    y += 8;
+
+    doc.setFontSize(9);
+    const dayEntries = [...entries].reverse();
+    for (const e of dayEntries) {
+      const m = info(e.mood);
+      const date = e.created_at ? new Date(e.created_at).toLocaleDateString('pt-BR') : '';
+      const intensity = e.intensity ? ` - ${INTENSITY_LABEL[e.intensity] || e.intensity}` : '';
+      const line = `${date} - ${m.label}${intensity}${e.reason ? ': ' + e.reason : ''}`;
+      if (y > 275) { doc.addPage(); y = 20; }
+      doc.text(line, 14, y);
+      y += 6;
+    }
+
+    doc.save(`relatorio-humor-${selectedMonth || 'atual'}.pdf`);
   }
 
   async function handleReset() {
