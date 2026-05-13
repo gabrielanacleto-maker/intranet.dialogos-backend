@@ -25,6 +25,8 @@ class CreateUserRequest(BaseModel):
     is_admin_user: bool = False
     is_rh: bool = False
     is_ouvidor: bool = False
+    is_diretor: bool = False
+    is_leader: bool = False
     points: int = 100
     password: str
     hire_date: Optional[str] = None
@@ -43,6 +45,8 @@ class UpdateUserRequest(BaseModel):
     is_admin_user: bool
     is_rh: bool
     is_ouvidor: bool
+    is_diretor: bool = False
+    is_leader: bool = False
     points: int
     hire_date: Optional[str] = None
     org_position: Optional[str] = 'colaborador'
