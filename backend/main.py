@@ -2226,6 +2226,115 @@ def mark_all_read(user=Depends(get_current_user), db=Depends(get_db)):
     )
     return {"ok": True}
 
+
+# ── Helper: extrai iniciais de um nome ─────────────────────────────────────
+def _get_initials(name: str):
+    if not name:
+        return "??"
+    parts = name.strip().split()
+    iniciais = "".join(p[0] for p in parts if p and p[0].isalpha())[:2].upper()
+    return iniciais or "??"
+
+
+# ── Helper: cor deterministic a partir do nome ──────────────────────────────
+_NOTIF_COLORS = ["#c0395a", "#b8842a", "#7b4fa6", "#2e7d6e",
+                  "#1a5fa3", "#d4537e", "#639922", "#ba7517"]
+
+def _get_actor_color(name: str):
+    if not name:
+        return "#c0395a"
+    h = sum(ord(c) for c in name)
+    return _NOTIF_COLORS[h % len(_NOTIF_COLORS)]
+
+
+# ── GET /api/notifications/v2 — retorna notificacoes no novo formato ────────
+@app.get("/api/notifications/v2")
+def get_notifications_v2(
+    type: str = None,
+    read: str = None,
+    limit: int = 50,
+    offset: int = 0,
+    user=Depends(get_current_user),
+    db=Depends(get_db)
+):
+    _ensure_notifications_table(db)
+    conditions = ["(n.target_user_key = %s OR n.audience = 'all' OR n.audience = %s)"]
+    params = [user["key"], user.get("dept", "")]
+
+    if type:
+        conditions.append("n.type = %s")
+        params.append(type)
+    if read is not None:
+        if read.lower() == "true":
+            conditions.append("n.is_read = TRUE")
+        elif read.lower() == "false":
+            conditions.append("n.is_read = FALSE")
+
+    where = " AND ".join(conditions)
+    rows = db.execute(
+        f"""SELECT n.*,
+            u.initials AS actor_initials,
+            u.color   AS actor_color
+            FROM notifications n
+            LEFT JOIN users u ON n.sender_key = u.key
+            WHERE {where}
+            ORDER BY n.created_at DESC
+            LIMIT %s OFFSET %s""",
+        params + [limit, offset]
+    ).fetchall()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        actor_name = d.get("sender_name") or "Sistema"
+        result.append({
+            "id": d["id"],
+            "type": d["type"],
+            "read": d["is_read"],
+            "created_at": d["created_at"],
+            "actor": {
+                "id": d.get("sender_key"),
+                "name": actor_name,
+                "avatar_url": None,
+                "initials": d.get("actor_initials") or _get_initials(actor_name),
+                "color": d.get("actor_color") or _get_actor_color(actor_name),
+            },
+            "action": d.get("title", ""),
+            "target": d.get("message", ""),
+            "target_type": None,
+            "link": d.get("reference_id"),
+        })
+
+    return result
+
+
+# ── PATCH /api/notifications/{notif_id}/read ─────────────────────────────────
+@app.patch("/api/notifications/{notif_id}/read")
+def mark_read_patch(notif_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_notifications_table(db)
+    db.execute(
+        """UPDATE notifications SET is_read = TRUE
+        WHERE id = %s
+            AND (target_user_key = %s OR audience = 'all' OR audience = %s)""",
+        (notif_id, user["key"], user.get("dept", ""))
+    )
+    return {"success": True}
+
+
+# ── PATCH /api/notifications/read-all ────────────────────────────────────────
+@app.patch("/api/notifications/read-all")
+def mark_all_read_patch(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_notifications_table(db)
+    cur = db.execute(
+        """UPDATE notifications SET is_read = TRUE
+        WHERE is_read = FALSE
+            AND (target_user_key = %s OR audience = 'all' OR audience = %s)""",
+        (user["key"], user.get("dept", ""))
+    )
+    updated = cur.rowcount if hasattr(cur, 'rowcount') else 0
+    return {"success": True, "updated": updated}
+
+
     # ============================================================
 # COLE ESSAS ROTAS NO FINAL DO SEU main.py
 # ============================================================
