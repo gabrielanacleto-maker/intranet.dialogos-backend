@@ -76,8 +76,8 @@ export default function App() {
 
   const navItems = [
     { key: 'novidades', label: 'Feed Novidades Diálogos', icon: '✨', show: canSeeNovidades, highlight: true },
+    { key: 'comunicado-interno', label: 'Feed Interno', icon: '📢', show: true },
     { key: 'feed', label: 'Feed Diálogos', icon: '📋', show: true },
-    { key: 'comunicado-interno', label: 'Comunicados Internos', icon: '📢', show: true },
     { key: 'sala', label: 'Sala', icon: '💬', show: true },
     { key: 'myprofile', label: 'Meu Perfil', icon: '👤', show: true },
     { key: 'calendario', label: 'Calendário', icon: '📅', show: true },
