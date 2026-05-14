@@ -32,6 +32,7 @@ class CreateUserRequest(BaseModel):
     hire_date: Optional[str] = None
     org_position: Optional[str] = 'colaborador'
     is_orcoma: Optional[bool] = False
+    nivel_dourado: Optional[bool] = False
 
 class UpdateUserRequest(BaseModel):
     name: str
@@ -51,6 +52,7 @@ class UpdateUserRequest(BaseModel):
     hire_date: Optional[str] = None
     org_position: Optional[str] = 'colaborador'
     is_orcoma: Optional[bool] = False
+    nivel_dourado: Optional[bool] = False
 
 class CreatePostRequest(BaseModel):
     feed: str = "feed"

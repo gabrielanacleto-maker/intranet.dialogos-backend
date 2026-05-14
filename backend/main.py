@@ -187,6 +187,24 @@ def log_action(db, actor_key, target_key, action_type, details=""):
             )
         )
 
+def require_diretor(user):
+    if not user.get("is_diretor"):
+        raise HTTPException(status_code=403, detail="Apenas diretores podem executar esta ação.")
+
+def require_rh(user):
+    if not user.get("is_rh") and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Apenas RH pode executar esta ação.")
+
+def require_ouvidor(user):
+    if not user.get("is_ouvidor") and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Apenas Ouvidores podem acessar esta funcionalidade.")
+
+def log_audit(db, actor_id, action, target_user_id=None, detail=""):
+    db.execute(
+        "INSERT INTO audit_log (id, actor_id, action, target_user_id, detail, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+        (str(uuid.uuid4()), actor_id, action, target_user_id, detail, datetime.datetime.utcnow().isoformat())
+    )
+
 
 def extract_room_id(channel_value: str | None):
         if not channel_value:
@@ -197,7 +215,7 @@ def extract_room_id(channel_value: str | None):
 
 def can_access_social_room(db, room_id: str, user):
         room = db.execute("SELECT * FROM social_rooms WHERE id=%s", (room_id,))
-        user = db.fetchone()
+        room = db.fetchone()
         if not room:
             return False, None
         room_dict = dict(room)
@@ -209,7 +227,7 @@ def can_access_social_room(db, room_id: str, user):
             "SELECT 1 FROM social_room_members WHERE room_id=%s AND user_key=%s",
             (room_id, user["key"])
         )
-        user = db.fetchone()
+        member = db.fetchone()
         return bool(member), room_dict
 
     # ── AUTH ──────────────────────────────────────────────────────────────────────
@@ -236,6 +254,8 @@ def login(body: LoginRequest, db=Depends(get_db)):
                 "is_admin": user["is_admin"], "is_admin_user": user["is_admin_user"],
                 "is_rh": user["is_rh"], "is_ouvidor": user["is_ouvidor"],
                 "is_diretor": user["is_diretor"], "is_leader": user["is_leader"],
+                "is_orcoma": user["is_orcoma"],
+                "nivel_dourado": bool(user.get("nivel_dourado")),
                 "points": user["points"], "photo_url": user["photo_url"],
             }
         }
@@ -250,6 +270,7 @@ def auth_me(user=Depends(get_current_user)):
         "is_rh": user["is_rh"], "is_ouvidor": user["is_ouvidor"],
         "is_diretor": user["is_diretor"], "is_leader": user["is_leader"],
         "is_orcoma": user["is_orcoma"],
+        "nivel_dourado": bool(user.get("nivel_dourado")),
         "points": user["points"], "photo_url": user["photo_url"],
         "password_changed": user["password_changed"],
     }
@@ -288,14 +309,15 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
             raise HTTPException(status_code=400, detail="Usuário já existe.")
         db.execute("""INSERT INTO users
             (key, name, initials, role, dept, level, color, access_level,
-            is_admin, is_admin_user, is_rh, is_ouvidor, is_diretor, is_leader, points,
+            is_admin, is_admin_user, is_rh, is_ouvidor, is_diretor, is_leader, nivel_dourado, points,
             password_hash, password_changed, photo_url)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s)""",
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s)""",
             (key, body.name, body.initials, body.role, body.dept,
             body.level, body.color, body.access_level,
             1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
             1 if body.is_diretor else 0, 1 if body.is_leader else 0,
+            1 if body.nivel_dourado else 0,
             body.points, hash_password(body.password), "")
         )
         db.commit()
@@ -319,13 +341,14 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
             if user["access_level"] == 2 and target["access_level"] >= 2:
                 raise HTTPException(status_code=403, detail="Você não pode editar admins.")
         db.execute("""UPDATE users SET name=%s, initials=%s, role=%s, dept=%s, level=%s,
-            color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, points=%s
+            color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, nivel_dourado=%s, points=%s
             WHERE key=%s""",
             (body.name, body.initials, body.role, body.dept, body.level,
             body.color, body.access_level,
             1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
             1 if body.is_diretor else 0, 1 if body.is_leader else 0,
+            1 if body.nivel_dourado else 0,
             body.points, target_key)
         )
         db.commit()
@@ -400,8 +423,21 @@ def delete_mural(item_id: str, user=Depends(get_current_user), db=Depends(get_db
 
 @app.get("/api/security-logs")
 def get_logs(user=Depends(require_level(2)), db=Depends(get_db)):
-    rows = db.execute("SELECT * FROM security_logs ORDER BY created_at DESC LIMIT 200").fetchall()
-    return [dict(r) for r in rows]
+    security = db.execute("SELECT * FROM security_logs ORDER BY created_at DESC LIMIT 200").fetchall()
+    audit = db.execute("SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 200").fetchall()
+    combined = [dict(r) for r in security]
+    for r in audit:
+        d = dict(r)
+        combined.append({
+            "id": d["id"],
+            "actor_key": d["actor_id"],
+            "target_key": d.get("target_user_id"),
+            "action_type": d["action"],
+            "details": d.get("detail", ""),
+            "created_at": d["created_at"],
+        })
+    combined.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return combined[:200]
 
 # ── POSTS ─────────────────────────────────────────────────────────────────────
 
@@ -458,7 +494,10 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
             is_rh = user.get("is_rh") or False
             is_admin = user.get("is_admin") or False
 
-            if comunicado_tipo == "diretoria":
+            if comunicado_tipo == "direcao":
+                if not is_diretor:
+                    raise HTTPException(status_code=403, detail="Apenas a Direção pode publicar Comunicados da Direção.")
+            elif comunicado_tipo == "diretoria":
                 if not (is_dir_role or is_diretor or is_leader or is_admin):
                     raise HTTPException(status_code=403, detail="Sem permissão para Comunicado da Diretoria.")
             elif comunicado_tipo == "lideranca":
@@ -657,6 +696,250 @@ def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_use
     db.commit()
     return {"comments": comments}
 
+# ── POST VIEWS ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/posts/{post_id}/view")
+def mark_post_viewed(post_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    post = db.execute("SELECT id FROM posts WHERE id=%s", (post_id,)).fetchone()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado")
+    existing = db.execute(
+        "SELECT 1 FROM post_views WHERE user_key=%s AND post_id=%s",
+        (user["key"], post_id)
+    ).fetchone()
+    if not existing:
+        db.execute(
+            "INSERT INTO post_views (id, user_key, post_id, viewed_at) VALUES (%s,%s,%s,%s)",
+            (str(uuid.uuid4()), user["key"], post_id, datetime.datetime.utcnow().isoformat())
+        )
+        db.commit()
+    return {"ok": True}
+
+@app.get("/api/posts/{post_id}/view-count")
+def get_post_view_count(post_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    post = db.execute("SELECT id FROM posts WHERE id=%s", (post_id,)).fetchone()
+    if not post:
+        raise HTTPException(status_code=404)
+    row = db.execute("SELECT COUNT(*) as cnt FROM post_views WHERE post_id=%s", (post_id,)).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+@app.get("/api/posts/unviewed-counts")
+def get_unviewed_counts(feed: str = "feed", user=Depends(get_current_user), db=Depends(get_db)):
+    social_room_id = extract_room_id(feed)
+    if social_room_id:
+        allowed, _ = can_access_social_room(db, social_room_id, user)
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Sem acesso.")
+    rows = db.execute(
+        "SELECT p.id FROM posts p WHERE p.feed=%s ORDER BY p.created_at DESC",
+        (feed,)
+    ).fetchall()
+    total = len(rows)
+    viewed_rows = db.execute(
+        "SELECT pv.post_id FROM post_views pv WHERE pv.user_key=%s AND pv.post_id IN (SELECT id FROM posts WHERE feed=%s)",
+        (user["key"], feed)
+    ).fetchall()
+    viewed_ids = {r["post_id"] for r in viewed_rows}
+    unviewed_count = total - len(viewed_ids)
+    unviewed_ids = [r["id"] for r in rows if r["id"] not in viewed_ids]
+    return {
+        "total": total,
+        "unviewed_count": unviewed_count,
+        "unviewed_ids": unviewed_ids[:50],
+    }
+
+# ── EVALUATIONS ────────────────────────────────────────────────────────────────
+
+@app.get("/api/evaluations/{employee_id}")
+def get_evaluations(employee_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    if user["key"] != employee_id and not (user.get("is_rh") or user.get("is_admin") or user.get("is_diretor") or user.get("is_leader")):
+        raise HTTPException(status_code=403, detail="Sem permissão para ver avaliações.")
+    rows = db.execute(
+        "SELECT * FROM evaluations WHERE employee_id=%s ORDER BY created_at DESC",
+        (employee_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/evaluations")
+def create_evaluation(body: dict, user=Depends(get_current_user), db=Depends(get_db)):
+    evaluation_type = body.get("evaluation_type", "")
+    employee_id = body.get("employee_id", "")
+    positive = body.get("positive_feedback", "")[:10000]
+    negative = body.get("negative_feedback", "")[:10000]
+    extra = body.get("extra_notes", "")[:10000]
+    stars = min(max(int(body.get("stars", 0)), 0), 5)
+    score_delta = int(body.get("score_delta", 0))
+
+    target = db.execute("SELECT * FROM users WHERE key=%s", (employee_id,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Colaborador não encontrado.")
+
+    if evaluation_type == "leader":
+        if not user.get("is_leader") and not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Apenas líderes podem fazer Avaliação do Líder.")
+        if user.get("is_leader") and not user.get("is_admin"):
+            # Líder só pode avaliar subordinados (manager_key = user.key)
+            if target.get("manager_key") != user["key"]:
+                raise HTTPException(status_code=403, detail="Você só pode avaliar sua própria equipe.")
+    elif evaluation_type == "rh":
+        if not user.get("is_rh") and not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Apenas RH pode fazer Avaliação do RH.")
+    elif evaluation_type == "diretor":
+        if not user.get("is_diretor") and not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Apenas Diretores podem fazer Avaliação do Diretor.")
+    else:
+        raise HTTPException(status_code=400, detail="Tipo de avaliação inválido.")
+
+    existing = db.execute(
+        "SELECT id FROM evaluations WHERE employee_id=%s AND evaluation_type=%s",
+        (employee_id, evaluation_type)
+    ).fetchone()
+    now = datetime.datetime.utcnow().isoformat()
+    eid = str(uuid.uuid4())
+
+    if existing:
+        db.execute(
+            """UPDATE evaluations SET positive_feedback=%s, negative_feedback=%s, extra_notes=%s,
+               score_delta=%s, stars=%s, updated_at=%s WHERE id=%s""",
+            (positive, negative, extra, score_delta, stars, now, existing["id"])
+        )
+        log_audit(db, user["key"], "evaluation_update", employee_id, f"Tipo: {evaluation_type}")
+    else:
+        db.execute(
+            """INSERT INTO evaluations (id, employee_id, evaluator_id, evaluation_type,
+               positive_feedback, negative_feedback, extra_notes, score_delta, stars, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (eid, employee_id, user["key"], evaluation_type, positive, negative, extra, score_delta, stars, now, now)
+        )
+        log_audit(db, user["key"], "evaluation_create", employee_id, f"Tipo: {evaluation_type}")
+
+    if score_delta != 0:
+        current_points = target["points"] or 0
+        new_points = max(0, current_points + score_delta)
+        db.execute("UPDATE users SET points=%s WHERE key=%s", (new_points, employee_id))
+
+    _notify(db, title="📋 Avaliação recebida",
+            message=f"Sua avaliação ({evaluation_type}) foi registrada por {user['name']}",
+            ntype="system", target_user_key=employee_id,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=eid, play_sound=True)
+
+    db.commit()
+    return {"ok": True, "id": eid}
+
+# ── COLLEAGUE FEEDBACK (LinkedIn-style) ───────────────────────────────────────
+
+@app.get("/api/colleague-feedback/{target_key}")
+def get_colleague_feedback(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute(
+        "SELECT * FROM colleague_feedback WHERE target_user_key=%s ORDER BY created_at DESC LIMIT 50",
+        (target_key,)
+    ).fetchall()
+    result = []
+    for r in rows:
+        entry = dict(r)
+        entry["reactions"] = json.loads(entry.get("reactions") or "{}")
+        can_delete = user["key"] == entry["author_key"] or user.get("is_admin")
+        entry["can_delete"] = can_delete
+        result.append(entry)
+    return result
+
+@app.post("/api/colleague-feedback")
+def create_colleague_feedback(body: dict, user=Depends(get_current_user), db=Depends(get_db)):
+    target_key = body.get("target_user_key", "")
+    text = body.get("text", "").strip()[:6000]
+    if not text:
+        raise HTTPException(status_code=400, detail="Feedback não pode ser vazio.")
+    if user["key"] == target_key:
+        raise HTTPException(status_code=400, detail="Você não pode avaliar a si mesmo.")
+
+    target = db.execute("SELECT 1 FROM users WHERE key=%s", (target_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    fid = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, reactions, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+        (fid, target_key, user["key"], text, "{}", now)
+    )
+    log_audit(db, user["key"], "colleague_feedback_create", target_key, f"Feedback de {user['name']}")
+    db.commit()
+    return {"ok": True, "id": fid}
+
+@app.put("/api/colleague-feedback/{feedback_id}")
+def update_colleague_feedback(feedback_id: str, body: dict, user=Depends(get_current_user), db=Depends(get_db)):
+    fb = db.execute("SELECT * FROM colleague_feedback WHERE id=%s", (feedback_id,)).fetchone()
+    if not fb:
+        raise HTTPException(status_code=404)
+    if fb["author_key"] != user["key"] and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Você não pode editar este feedback.")
+    text = body.get("text", "").strip()[:6000]
+    if not text:
+        raise HTTPException(status_code=400, detail="Feedback não pode ser vazio.")
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute("UPDATE colleague_feedback SET text=%s, updated_at=%s WHERE id=%s", (text, now, feedback_id))
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/colleague-feedback/{feedback_id}")
+def delete_colleague_feedback(feedback_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    fb = db.execute("SELECT * FROM colleague_feedback WHERE id=%s", (feedback_id,)).fetchone()
+    if not fb:
+        raise HTTPException(status_code=404)
+    if fb["author_key"] != user["key"] and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    db.execute("DELETE FROM colleague_feedback WHERE id=%s", (feedback_id,))
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/colleague-feedback/{feedback_id}/react")
+def react_to_feedback(feedback_id: str, body: dict, user=Depends(get_current_user), db=Depends(get_db)):
+    fb = db.execute("SELECT * FROM colleague_feedback WHERE id=%s", (feedback_id,)).fetchone()
+    if not fb:
+        raise HTTPException(status_code=404)
+    reactions = json.loads(fb.get("reactions") or "{}")
+    emoji = body.get("emoji", "")
+    if emoji not in ("❤️", "👏", "🔥", "⭐"):
+        raise HTTPException(status_code=400, detail="Reação inválida")
+    user_key = user["key"]
+    if user_key in reactions.get(emoji, []):
+        reactions[emoji].remove(user_key)
+        if not reactions[emoji]:
+            del reactions[emoji]
+    else:
+        reactions.setdefault(emoji, []).append(user_key)
+    db.execute("UPDATE colleague_feedback SET reactions=%s WHERE id=%s", (json.dumps(reactions), feedback_id))
+    db.commit()
+    return {"reactions": reactions}
+
+# ── PRESENCE ───────────────────────────────────────────────────────────────────
+
+@app.post("/api/presence/heartbeat")
+def presence_heartbeat(user=Depends(get_current_user), db=Depends(get_db)):
+    now = datetime.datetime.utcnow().isoformat()
+    existing = db.execute("SELECT 1 FROM presence WHERE user_key=%s", (user["key"],)).fetchone()
+    if existing:
+        db.execute("UPDATE presence SET is_online=1, last_seen=%s, last_activity=%s WHERE user_key=%s",
+                   (now, now, user["key"]))
+    else:
+        db.execute("INSERT INTO presence (user_key, is_online, last_seen, last_activity) VALUES (%s,1,%s,%s)",
+                   (user["key"], now, now))
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/presence/logout")
+def presence_logout(user=Depends(get_current_user), db=Depends(get_db)):
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute("UPDATE presence SET is_online=0, last_seen=%s WHERE user_key=%s", (now, user["key"]))
+    db.commit()
+    return {"ok": True}
+
+@app.get("/api/presence")
+def get_presence(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("SELECT user_key, is_online, last_seen, last_activity FROM presence").fetchall()
+    return [dict(r) for r in rows]
+
 # ── MURAL ITEMS ───────────────────────────────────────────────────────────────
 
 @app.get("/api/mural")
@@ -727,10 +1010,15 @@ def get_folders(user=Depends(get_current_user), db=Depends(get_db)):
     return [dict(r) for r in rows]
 
 @app.post("/api/folders")
-def create_folder(body: FolderRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+def create_folder(body: FolderRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if user["access_level"] < 2:
+        has_nivel_dourado = user.get("nivel_dourado") if "nivel_dourado" in user else False
+        if not has_nivel_dourado:
+            raise HTTPException(status_code=403, detail="Apenas usuários com nível Dourado podem criar pastas.")
     fid = str(uuid.uuid4())
-    db.execute("INSERT INTO folders (id, name, icon, level, drive_link) VALUES (%s,%s,%s,%s,%s)",
-            (fid, body.name, body.icon, body.level, body.drive_link or ""))
+    db.execute("INSERT INTO folders (id, name, icon, level, drive_link, created_by) VALUES (%s,%s,%s,%s,%s,%s)",
+            (fid, body.name, body.icon, body.level, body.drive_link or "", user["key"]))
+    log_audit(db, user["key"], "folder_create", None, f"Pasta: {body.name}")
     db.commit()
     return {"ok": True, "id": fid}
 
@@ -1155,11 +1443,10 @@ def delete_social_room_file(room_id: str, file_id: str, user=Depends(get_current
 
 @app.get("/api/ouvidoria")
 def get_ouvidoria(user=Depends(get_current_user), db=Depends(get_db)):
-    if user["is_ouvidor"] or user["is_admin"] or user["is_admin_user"]:
-        rows = db.execute("SELECT * FROM ouvidoria ORDER BY created_at DESC").fetchall()
-    else:
-        rows = db.execute("SELECT * FROM ouvidoria WHERE author_key=%s ORDER BY created_at DESC",
-                        (user["key"],)).fetchall()
+    is_ouvidor = user.get("is_ouvidor") or (user.get("role") or "").lower() == "ouvidor"
+    if not is_ouvidor and not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Acesso restrito a Ouvidores.")
+    rows = db.execute("SELECT * FROM ouvidoria ORDER BY created_at DESC").fetchall()
     return [dict(r) for r in rows]
 
 @app.post("/api/ouvidoria")
@@ -1174,13 +1461,20 @@ def create_ouvidoria(body: OuvidoriaRequest, user=Depends(get_current_user), db=
     return {"ok": True, "id": oid}
 
 @app.put("/api/ouvidoria/{oid}/status")
-def update_ouvidoria_status(oid: str, body: OuvidoriaStatusRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+def update_ouvidoria_status(oid: str, body: OuvidoriaStatusRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    is_ouvidor = user.get("is_ouvidor") or (user.get("role") or "").lower() == "ouvidor"
+    if not is_ouvidor and not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Apenas Ouvidores podem alterar status.")
     db.execute("UPDATE ouvidoria SET status=%s WHERE id=%s", (body.status, oid))
+    log_audit(db, user["key"], "ouvidoria_status", None, f"Status alterado para {body.status}")
     db.commit()
     return {"ok": True}
 
 @app.post("/api/ouvidoria/{oid}/respond")
-def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    is_ouvidor = user.get("is_ouvidor") or (user.get("role") or "").lower() == "ouvidor"
+    if not is_ouvidor and not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Apenas Ouvidores podem responder.")
     ouid = db.execute("SELECT responses FROM ouvidoria WHERE id=%s", (oid,)).fetchone()
     if not ouid:
         raise HTTPException(status_code=404, detail="Ouvidoria não encontrada")
@@ -1224,10 +1518,14 @@ def get_ranking(user=Depends(get_current_user), db=Depends(get_db)):
 
 @app.put("/api/users/{target_key}/points")
 def update_points(target_key: str, body: PointsRequest, user=Depends(require_level(2)), db=Depends(get_db)):
-    target = db.execute("SELECT name FROM users WHERE key=%s", (target_key,)).fetchone()
-    db.execute("UPDATE users SET points=%s WHERE key=%s", (body.points, target_key))
+    target = db.execute("SELECT name, points FROM users WHERE key=%s", (target_key,)).fetchone()
+    old_points = target["points"] or 0
+    new_points = body.points
+    db.execute("UPDATE users SET points=%s WHERE key=%s", (new_points, target_key))
+    log_audit(db, user["key"], "points_update", target_key,
+              f"Pontos alterados: {old_points} → {new_points} (por {user['name']})")
     _notify(db, title="📊 Pontos atualizados",
-            message=f"Seus pontos foram atualizados para {body.points} por {user['name']}",
+            message=f"Seus pontos foram atualizados de {old_points} para {new_points} por {user['name']}",
             ntype="xp", target_user_key=target_key,
             sender_key=user["key"], sender_name=user["name"],
             play_sound=True)
@@ -1350,7 +1648,7 @@ def delete_price_procedure(proc_id: str, user=Depends(require_level(1)), db=Depe
 # ── CALENDAR EVENTS ───────────────────────────────────────────────────────────
 
 @app.get("/api/calendar")
-def get_calendar_events(db=Depends(get_db)):
+def get_calendar_events(user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute("SELECT * FROM calendar_events ORDER BY start_date ASC").fetchall()
     return [dict(r) for r in rows]
 
@@ -1358,29 +1656,45 @@ def get_calendar_events(db=Depends(get_db)):
 def create_calendar_event(body: CalendarEventRequest, user=Depends(get_current_user), db=Depends(get_db)):
     event_id = str(uuid.uuid4())
     db.execute("""INSERT INTO calendar_events
-        (id, title, description, location, color, start_date, end_date, all_day, is_public, repeat_type, created_by, created_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (id, title, description, location, color, start_date, end_date, all_day, is_public, repeat_type, created_by, created_at, user_key)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (event_id, body.title, body.description or "", body.location or "", body.color or "#C9A84C",
         body.start_date, body.end_date, 1 if body.all_day else 0, 1 if body.is_public else 0,
-        body.repeat_type or "none", user["key"], datetime.datetime.utcnow().isoformat())
+        body.repeat_type or "none", user["key"], datetime.datetime.utcnow().isoformat(), user["key"])
     )
+    log_audit(db, user["key"], "calendar_create", user["key"],
+              f"Evento criado: {body.title}")
     db.commit()
     return {"ok": True, "id": event_id}
 
 @app.put("/api/calendar/{event_id}")
 def update_calendar_event(event_id: str, body: CalendarEventRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    event = db.execute("SELECT * FROM calendar_events WHERE id=%s", (event_id,)).fetchone()
+    if not event:
+        raise HTTPException(status_code=404, detail="Evento não encontrado.")
+    if event["user_key"] != user["key"] and not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Você só pode editar seus próprios eventos.")
     db.execute("""UPDATE calendar_events SET title=%s, description=%s, location=%s, color=%s,
         start_date=%s, end_date=%s, all_day=%s, is_public=%s, repeat_type=%s WHERE id=%s""",
         (body.title, body.description or "", body.location or "", body.color or "#C9A84C",
         body.start_date, body.end_date, 1 if body.all_day else 0, 1 if body.is_public else 0,
         body.repeat_type or "none", event_id)
     )
+    log_audit(db, user["key"], "calendar_update", event["user_key"],
+              f"Evento atualizado: {body.title}")
     db.commit()
     return {"ok": True}
 
 @app.delete("/api/calendar/{event_id}")
 def delete_calendar_event(event_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    event = db.execute("SELECT * FROM calendar_events WHERE id=%s", (event_id,)).fetchone()
+    if not event:
+        raise HTTPException(status_code=404, detail="Evento não encontrado.")
+    if event["user_key"] != user["key"] and not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Você só pode remover seus próprios eventos.")
     db.execute("DELETE FROM calendar_events WHERE id=%s", (event_id,))
+    log_audit(db, user["key"], "calendar_delete", event["user_key"],
+              f"Evento removido: {event.get('title', '')}")
     db.commit()
     return {"ok": True}
 # ── GAMIFICAÇÃO (PONTOS, BADGES, LEADERBOARD) ──────────────────────────────
