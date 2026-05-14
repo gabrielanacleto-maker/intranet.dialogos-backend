@@ -103,6 +103,7 @@ export const api = {
   // Chat
   getChat: (roomId) => req('GET', `/api/chat/${roomId}`),
   sendChat: (room_id, text) => req('POST', '/api/chat', { room_id, text }),
+  getRecentChats: () => req('GET', '/api/chat/recent'),
 
   // Social / Comunidade
   getSocialRooms: () => req('GET', '/api/social-rooms'),
