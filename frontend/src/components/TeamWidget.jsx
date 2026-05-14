@@ -50,7 +50,7 @@ function UserMiniCard({ u, onChat, onProfile }) {
 const REACTIONS = ['❤️', '👍', '😂', '😮', '😢', '🔥', '🎉', '👏'];
 const EMOJI_LIST = ['😀','😂','🥰','😎','🤔','😅','🙏','👍','🔥','❤️','🎉','✅','💯','🚀','⭐','💪','😄','🤣','😊','😍','😒','😢','😡','👋','✌️','🤝','👀','💡','📌','🎯','🎨','💼','📅','🏥','💊','🩺','🧬','📋','✏️','📢','🔒','🌟','⚡','🛡️','👑','💎','🟡','⬜'];
 
-function ChatWindow({ targetUser, currentUser, onClose }) {
+function ChatWindow({ targetUser, currentUser, onClose, onMinimize }) {
   const roomId = [currentUser.key, targetUser.key].sort().join('_');
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
@@ -100,11 +100,11 @@ function ChatWindow({ targetUser, currentUser, onClose }) {
 
   return (
     <div style={{
-      position: 'fixed', bottom: 20, right: 300, width: 340, height: 480,
+      position: 'fixed', bottom: 60, right: 300, width: 340, height: 480,
       background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16,
       boxShadow: '0 8px 40px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', zIndex: 9000,
     }}>
-      {/* Chat header */}
+      {/* Chat header with controls */}
       <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, background: 'var(--sidebar-bg)', borderRadius: '16px 16px 0 0' }}>
         <div style={{ width: 36, height: 36, borderRadius: '50%', overflow: 'hidden', background: photoUrl ? 'transparent' : bg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 14 }}>
           {photoUrl ? <img src={photoUrl} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : targetUser.initials}
@@ -113,7 +113,10 @@ function ChatWindow({ targetUser, currentUser, onClose }) {
           <div style={{ fontSize: 14, fontWeight: 600, color: '#fff' }}>{targetUser.name}</div>
           <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>{targetUser.role}</div>
         </div>
-        <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 16 }}>✕</button>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button onClick={onMinimize} title="Minimizar" style={{ background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 16, width: 28, height: 28, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1 }}>−</button>
+          <button onClick={onClose} title="Fechar" style={{ background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 14, width: 28, height: 28, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+        </div>
       </div>
 
       {/* Messages */}
@@ -259,20 +262,142 @@ function ProfileModal({ targetUser, currentUser, onClose, onChat }) {
   );
 }
 
+function MinimizedChat({ u, unread, onRestore, onCloseMinimized }) {
+  const photoUrl = u.photo_url ? api.assetUrl(u.photo_url) : null;
+  const bg = AV_COLORS[u.color] || '#C9A84C';
+  const hasUnread = (unread || 0) > 0;
+  return (
+    <div
+      onClick={() => onRestore(u)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '5px 10px', borderRadius: 10,
+        background: hasUnread ? 'var(--gold)' : 'var(--bg)',
+        border: hasUnread ? '2px solid #ff2d7a' : '1px solid var(--border)',
+        cursor: 'pointer', fontSize: 12,
+        animation: hasUnread ? 'pulse 2s infinite' : 'none',
+        position: 'relative',
+      }}
+    >
+      <div style={{ width: 22, height: 22, borderRadius: '50%', overflow: 'hidden', background: photoUrl ? 'transparent' : bg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 9, flexShrink: 0 }}>
+        {photoUrl ? <img src={photoUrl} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : u.initials}
+      </div>
+      <span style={{ fontWeight: hasUnread ? 700 : 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 70 }}>{u.name}</span>
+      {hasUnread && (
+        <span style={{
+          background: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 700,
+          borderRadius: '50%', minWidth: 18, height: 18,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '0 4px',
+        }}>{unread}</span>
+      )}
+      <button
+        onClick={e => { e.stopPropagation(); onCloseMinimized(u); }}
+        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: hasUnread ? '#fff' : 'var(--text-muted)', padding: '0 2px', lineHeight: 1 }}
+      >✕</button>
+    </div>
+  );
+}
+
 export default function TeamWidget() {
   const { user } = useAuth();
   const [users, setUsers] = useState([]);
   const [search, setSearch] = useState('');
-  const [chatWith, setChatWith] = useState(null);
-  const [profileOf, setProfileOf] = useState(null);
+  const [activeChat, setActiveChat] = useState(null);
+  const [minimizedChats, setMinimizedChats] = useState([]);
+  const [unreadCounts, setUnreadCounts] = useState({});
+  const knownRoomsRef = useRef(new Set());
+  const activeChatRef = useRef(activeChat);
+  activeChatRef.current = activeChat;
+  const minimizedRef = useRef(minimizedChats);
+  minimizedRef.current = minimizedChats;
+  const usersRef = useRef(users);
+  usersRef.current = users;
 
   useEffect(() => {
     api.getUsers().then(data => setUsers(data.filter(u => u.key !== user.key))).catch(() => {});
   }, []);
 
+  // Poll for new conversations every 3s
+  useEffect(() => {
+    if (!user?.key) return;
+    let initialized = false;
+    async function pollRecent() {
+      try {
+        const rooms = await api.getRecentChats();
+        const known = knownRoomsRef.current;
+        const isFirst = !initialized;
+        for (const room of rooms) {
+          if (isFirst) {
+            known.add(room.room_id);
+            continue;
+          }
+          if (known.has(room.room_id)) continue;
+          known.add(room.room_id);
+          const isFromMe = room.last_sender_key === user.key;
+          const otherUser = usersRef.current.find(u => u.key === room.other_key);
+          if (!otherUser) continue;
+          if (!isFromMe) {
+            // New incoming conversation from other user — auto-open
+            const cur = activeChatRef.current;
+            const minimized = minimizedRef.current;
+            if (cur?.key !== room.other_key && !minimized.find(c => c.key === room.other_key)) {
+              setActiveChat(otherUser);
+            }
+          }
+          // Bump unread if chat is not active
+          const cur = activeChatRef.current;
+          if (cur?.key !== room.other_key) {
+            setUnreadCounts(prev => ({ ...prev, [room.other_key]: (prev[room.other_key] || 0) + 1 }));
+          }
+        }
+        initialized = true;
+      } catch {}
+    }
+    pollRecent();
+    const interval = setInterval(pollRecent, 3000);
+    return () => clearInterval(interval);
+  }, [user?.key]);
+
+  // Track activeChat changes to reset unread
+  useEffect(() => {
+    if (activeChat) {
+      setUnreadCounts(prev => ({ ...prev, [activeChat.key]: 0 }));
+    }
+  }, [activeChat?.key]);
+
   const filtered = users.filter(u =>
     [u.name, u.role, u.dept].join(' ').toLowerCase().includes(search.toLowerCase())
   );
+
+  function handleOpenChat(targetUser) {
+    if (activeChat?.key === targetUser.key) return;
+    // Remove from minimized if present
+    setMinimizedChats(prev => prev.filter(c => c.key !== targetUser.key));
+    setActiveChat(targetUser);
+    setUnreadCounts(prev => ({ ...prev, [targetUser.key]: 0 }));
+  }
+
+  function handleMinimize(targetUser) {
+    setMinimizedChats(prev => {
+      if (prev.find(c => c.key === targetUser.key)) return prev;
+      return [...prev, targetUser];
+    });
+    setActiveChat(null);
+  }
+
+  function handleCloseChat(targetUser) {
+    setMinimizedChats(prev => prev.filter(c => c.key !== targetUser.key));
+    if (activeChat?.key === targetUser.key) {
+      setActiveChat(null);
+    }
+  }
+
+  function handleRestore(targetUser) {
+    setMinimizedChats(prev => prev.filter(c => c.key !== targetUser.key));
+    setActiveChat(targetUser);
+    setUnreadCounts(prev => ({ ...prev, [targetUser.key]: 0 }));
+  }
 
   return (
     <div className="widget" style={{ padding: 0 }}>
@@ -293,26 +418,41 @@ export default function TeamWidget() {
             <UserMiniCard
               key={u.key}
               u={u}
-              onChat={setChatWith}
+              onChat={handleOpenChat}
               onProfile={target => openColleagueProfile(target.key)}
             />
           ))
         )}
       </div>
 
-      {chatWith && (
-        <ChatWindow
-          targetUser={chatWith}
-          currentUser={user}
-          onClose={() => setChatWith(null)}
-        />
+      {/* Minimized chats bar */}
+      {minimizedChats.length > 0 && (
+        <div style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0,
+          display: 'flex', gap: 6, padding: '8px 16px',
+          background: 'var(--surface)', borderTop: '1px solid var(--border)',
+          zIndex: 99999, overflowX: 'auto', justifyContent: 'center',
+          boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
+        }}>
+          {minimizedChats.map(u => (
+            <MinimizedChat
+              key={u.key}
+              u={u}
+              unread={unreadCounts[u.key] || 0}
+              onRestore={handleRestore}
+              onCloseMinimized={handleCloseChat}
+            />
+          ))}
+        </div>
       )}
-      {profileOf && (
-        <ProfileModal
-          targetUser={profileOf}
+
+      {/* Active chat window */}
+      {activeChat && (
+        <ChatWindow
+          targetUser={activeChat}
           currentUser={user}
-          onClose={() => setProfileOf(null)}
-          onChat={u => { setProfileOf(null); setChatWith(u); }}
+          onClose={() => handleCloseChat(activeChat)}
+          onMinimize={() => handleMinimize(activeChat)}
         />
       )}
     </div>

@@ -860,8 +860,65 @@ def send_chat_message(body: ChatMessageRequest, user=Depends(get_current_user), 
                     ntype="comment", target_user_key=m["user_key"],
                     sender_key=user["key"], sender_name=user["name"],
                     reference_id=mid, play_sound=False)
+    else:
+        # DM notification — notify the other participant(s)
+        other_senders = db.execute(
+            "SELECT DISTINCT sender_key FROM chat_messages WHERE room_id=%s AND sender_key!=%s",
+            (body.room_id, user["key"])
+        ).fetchall()
+        if not other_senders:
+            # First message in DM — infer receiver from room_id
+            parts = body.room_id.split('_')
+            if len(parts) == 2:
+                receiver_key = parts[1] if parts[0] == user['key'] else parts[0]
+                other_user = db.execute("SELECT key FROM users WHERE key=%s", (receiver_key,)).fetchone()
+                if other_user:
+                    other_senders = [{"sender_key": receiver_key}]
+        for o in other_senders:
+            _notify(db, title="💬 Nova mensagem",
+                    message=f"{user['name']}: {(body.text or '')[:80]}",
+                    ntype="chat", target_user_key=o["sender_key"],
+                    sender_key=user["key"], sender_name=user["name"],
+                    reference_id=mid, play_sound=True)
     db.commit()
     return {"ok": True, "id": mid}
+
+@app.get("/api/chat/recent")
+def get_recent_chats(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""
+        SELECT room_id, MAX(created_at) as last_at, COUNT(*) as msg_count
+        FROM chat_messages
+        WHERE room_id NOT LIKE 'sala_%%'
+          AND (room_id LIKE %s OR room_id LIKE %s)
+        GROUP BY room_id ORDER BY last_at DESC LIMIT 20
+    """, (f"{user['key']}_%", f"%_{user['key']}")).fetchall()
+    result = []
+    for r in rows:
+        parts = r["room_id"].split("_")
+        other_key = parts[1] if parts[0] == user["key"] else parts[0]
+        ou = db.execute(
+            "SELECT key,name,initials,photo_url,color,role FROM users WHERE key=%s",
+            (other_key,)
+        ).fetchone()
+        ou_dict = dict(ou) if ou else None
+        last = db.execute(
+            "SELECT text,sender_key,created_at FROM chat_messages WHERE room_id=%s ORDER BY created_at DESC LIMIT 1",
+            (r["room_id"],)
+        ).fetchone()
+        last_dict = dict(last) if last else None
+        result.append({
+            "room_id": r["room_id"],
+            "other_key": other_key,
+            "other_name": ou_dict["name"] if ou_dict else other_key,
+            "other_initials": ou_dict["initials"] if ou_dict else "?",
+            "other_photo": ou_dict.get("photo_url", "") if ou_dict else "",
+            "other_color": ou_dict.get("color", "#C9A84C") if ou_dict else "#C9A84C",
+            "last_message": (last_dict["text"] or "")[:80] if last_dict else "",
+            "last_sender_key": last_dict["sender_key"] if last_dict else "",
+            "last_at": r["last_at"],
+            "message_count": r["msg_count"],
+        })
+    return result
 
 # ── SOCIAL / COMUNIDADE ───────────────────────────────────────────────────────
 
