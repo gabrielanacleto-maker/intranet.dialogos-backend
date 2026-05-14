@@ -206,7 +206,7 @@ function MuralCarousel() {
 }
 
 // ── FeedPage principal ───────────────────────────────────────────────────────
-export default function FeedPage({ feedType = 'feed' }) {
+export default function FeedPage({ feedType = 'feed', canPostOverride }) {
   const { user, allUsers, canPostNovidades, canAdmin } = useAuth();
   const toast = useToast();
   const [posts, setPosts] = useState([]);
@@ -232,7 +232,7 @@ export default function FeedPage({ feedType = 'feed' }) {
   const videoFileRef = useRef();
   const composerRef = useRef();
 
-  const canPost = feedType === 'feed' || (feedType === 'novidades' && canPostNovidades);
+  const canPost = canPostOverride ?? (feedType === 'feed' || (feedType === 'novidades' && canPostNovidades));
   const mentionUsers = Object.values(allUsers || {});
 
   // Who can mark comunicado type — using role + server-side flags

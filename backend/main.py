@@ -436,6 +436,16 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
                         user["level"] in ["platina", "diamante"])
             if not can_post:
                 raise HTTPException(status_code=403, detail="Sem permissão para publicar no Feed Novidades.")
+        if body.feed == "internal":
+            role = (user.get("role") or "").lower()
+            can_post = (
+                user.get("is_admin") or user.get("is_admin_user") or
+                user.get("is_rh") or
+                user.get("is_diretor") or user.get("is_leader") or
+                role in ("diretora", "diretor", "líder", "lider", "admin", "rh")
+            )
+            if not can_post:
+                raise HTTPException(status_code=403, detail="Sem permissão para publicar Comunicado Interno.")
 
         # Server-side validation for comunicado_tipo — never trust the client
         comunicado_tipo = body.comunicado_tipo
