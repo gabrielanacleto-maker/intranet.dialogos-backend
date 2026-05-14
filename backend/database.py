@@ -70,6 +70,120 @@ def init_db():
         c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_rh INTEGER DEFAULT 0")
         c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_admin INTEGER DEFAULT 0")
 
+        # ── NOVAS TABELAS ──────────────────────────────────────────────────────
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_diretor INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_leader INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_orcoma INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS hire_date TEXT DEFAULT ''")  
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_position TEXT DEFAULT 'colaborador'")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_key TEXT DEFAULT NULL")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS nivel_dourado INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url TEXT DEFAULT ''")
+        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_role TEXT DEFAULT ''")
+        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_rh INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_admin INTEGER DEFAULT 0")
+
+        # post_views table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS post_views (
+                id TEXT PRIMARY KEY,
+                user_key TEXT NOT NULL,
+                post_id TEXT NOT NULL,
+                viewed_at TEXT NOT NULL,
+                UNIQUE(user_key, post_id)
+            )
+        """)
+
+        # evaluations table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS evaluations (
+                id TEXT PRIMARY KEY,
+                employee_id TEXT NOT NULL,
+                evaluator_id TEXT NOT NULL,
+                evaluation_type TEXT NOT NULL CHECK(evaluation_type IN ('leader','rh','diretor')),
+                positive_feedback TEXT DEFAULT '',
+                negative_feedback TEXT DEFAULT '',
+                extra_notes TEXT DEFAULT '',
+                score_delta INTEGER DEFAULT 0,
+                stars INTEGER DEFAULT 0 CHECK(stars >= 0 AND stars <= 5),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        # presence table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS presence (
+                user_key TEXT PRIMARY KEY,
+                is_online INTEGER DEFAULT 0,
+                last_seen TEXT,
+                last_activity TEXT
+            )
+        """)
+
+        # colleague_feedback table (LinkedIn-style)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS colleague_feedback (
+                id TEXT PRIMARY KEY,
+                target_user_key TEXT NOT NULL,
+                author_key TEXT NOT NULL,
+                text TEXT NOT NULL,
+                reactions TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT
+            )
+        """)
+
+        # audit_log table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id TEXT PRIMARY KEY,
+                actor_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_user_id TEXT,
+                detail TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        # calendar_events table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS calendar_events (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                location TEXT DEFAULT '',
+                color TEXT DEFAULT '#C9A84C',
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                all_day INTEGER DEFAULT 0,
+                is_public INTEGER DEFAULT 0,
+                repeat_type TEXT DEFAULT 'none',
+                created_by TEXT DEFAULT '',
+                user_key TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        # ADD column nivelDourado to folders  
+        try:
+            c.execute("ALTER TABLE folders ADD COLUMN IF NOT EXISTS nivel_dourado INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # ADD column created_by to folders
+        try:
+            c.execute("ALTER TABLE folders ADD COLUMN IF NOT EXISTS created_by TEXT DEFAULT ''")
+        except:
+            pass
+
+        # Ensure calendar_events has user_key column
+        try:
+            c.execute("ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS user_key TEXT DEFAULT ''")
+            c.execute("UPDATE calendar_events SET user_key = created_by WHERE user_key = '' OR user_key IS NULL")
+        except:
+            pass
+
         c.execute("SELECT 1 FROM users WHERE key=%s", ('gabriel',))
         if not c.fetchone():
             c.execute("""INSERT INTO users
