@@ -12,6 +12,7 @@ import CursorGlow from './components/CursorGlow';
 import Loading from './pages/Loading';
 import Equipe from './pages/Equipe';
 import OuvidoriaPage from './pages/OuvidoriaPage';
+import ComunicadoInterno from './pages/ComunicadoInterno';
 import TeamWidget from './components/TeamWidget';
 import { api } from './services/api';
 import { AV_COLORS, LEVEL_LABEL, LEVEL_BADGE_CLASS, CURSOR_OPTIONS, getTenureLabel, getTenureClass, getRoleGlowClass, getRoleStyle } from './utils';
@@ -76,6 +77,7 @@ export default function App() {
   const navItems = [
     { key: 'novidades', label: 'Feed Novidades Diálogos', icon: '✨', show: canSeeNovidades, highlight: true },
     { key: 'feed', label: 'Feed Diálogos', icon: '📋', show: true },
+    { key: 'comunicado-interno', label: 'Comunicados Internos', icon: '📢', show: true },
     { key: 'sala', label: 'Sala', icon: '💬', show: true },
     { key: 'myprofile', label: 'Meu Perfil', icon: '👤', show: true },
     { key: 'calendario', label: 'Calendário', icon: '📅', show: true },
@@ -94,6 +96,7 @@ export default function App() {
     switch (page) {
       case 'feed': return <FeedPage feedType="feed" />;
       case 'novidades': return <NovidadesPage />;
+      case 'comunicado-interno': return <ComunicadoInterno />;
       case 'docs': return <DocsPage />;
       case 'myprofile': return <ProfilePage />;
       case 'admin': return <AdminPage />;
