@@ -12,6 +12,7 @@ node_modules/
 frontend/node_modules/
 
 dist/
+frontend/
 *.db
 uploads/
 .vscode/
