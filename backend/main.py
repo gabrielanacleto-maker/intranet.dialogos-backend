@@ -2163,7 +2163,7 @@ def get_metric_pesquisas(user=Depends(get_current_user), db=Depends(get_db)):
 def get_tarefas_hoje(user=Depends(get_current_user), db=Depends(get_db)):
     hoje = datetime.date.today().isoformat()
 
-    # Tarefas persistidas do usuário com prazo = hoje
+    # Tarefas persistidas do usuário: pendentes (qualquer prazo) + concluídas recentes
     tarefas = db.execute(
         """SELECT t.*, u.name AS destinatario_nome, u.initials AS destinatario_initials,
                   u.color AS destinatario_color,
@@ -2171,8 +2171,8 @@ def get_tarefas_hoje(user=Depends(get_current_user), db=Depends(get_db)):
            FROM tarefas t
            LEFT JOIN users u ON u.key = t.destinatario_id
            LEFT JOIN users c ON c.key = t.criado_por
-           WHERE t.destinatario_id = %s AND t.prazo <= %s
-           ORDER BY t.created_at DESC""",
+           WHERE t.destinatario_id = %s AND (t.concluida = 0 OR t.prazo >= %s)
+           ORDER BY t.prazo ASC, t.created_at DESC""",
         (user["key"], hoje)
     ).fetchall()
 
