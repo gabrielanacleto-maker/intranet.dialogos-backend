@@ -160,3 +160,12 @@ class FeedbackRequest(BaseModel):
     rating: int
     action: str        # "add" ou "remove"
     points: int
+
+class CriarTarefaRequest(BaseModel):
+    titulo: str
+    descricao: Optional[str] = ""
+    prazo: str
+    destinatarios: list[str]
+
+class ConcluirTarefaRequest(BaseModel):
+    pass

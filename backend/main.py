@@ -2121,6 +2121,162 @@ def create_feedback(body: FeedbackRequest, user=Depends(get_current_user), db=De
     return {"ok": True, "feedback_id": fid, "new_xp": new_xp}
 
 
+# ── MÉTRICAS ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/metricas/celebracoes")
+def get_metric_celebracoes(user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute(
+        "SELECT COUNT(*) as cnt FROM celebracoes WHERE target_user_key=%s",
+        (user["key"],)
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+@app.get("/api/metricas/feedbacks")
+def get_metric_feedbacks(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_feedback_tables(db)
+    row = db.execute(
+        "SELECT COUNT(*) as cnt FROM feedbacks WHERE target_user_key=%s",
+        (user["key"],)
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+@app.get("/api/metricas/objetivos")
+def get_metric_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute(
+        "SELECT COUNT(*) as cnt FROM objetivos WHERE user_key=%s",
+        (user["key"],)
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+@app.get("/api/metricas/pesquisas")
+def get_metric_pesquisas(user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute(
+        "SELECT COUNT(*) as cnt FROM pesquisas WHERE user_key=%s",
+        (user["key"],)
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+
+# ── TAREFAS ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/tarefas/hoje")
+def get_tarefas_hoje(user=Depends(get_current_user), db=Depends(get_db)):
+    hoje = datetime.date.today().isoformat()
+
+    # Tarefas persistidas do usuário com prazo = hoje
+    tarefas = db.execute(
+        """SELECT t.*, u.name AS destinatario_nome, u.initials AS destinatario_initials,
+                  u.color AS destinatario_color,
+                  c.name AS criador_nome
+           FROM tarefas t
+           LEFT JOIN users u ON u.key = t.destinatario_id
+           LEFT JOIN users c ON c.key = t.criado_por
+           WHERE t.destinatario_id = %s AND t.prazo <= %s
+           ORDER BY t.created_at DESC""",
+        (user["key"], hoje)
+    ).fetchall()
+
+    result = [dict(t) for t in tarefas]
+
+    # Tarefas de aniversário geradas automaticamente
+    today_md = datetime.date.today().strftime("%m-%d")
+    aniversariantes = db.execute(
+        "SELECT key, name, initials, color FROM users WHERE SUBSTRING(birth_date, 6, 5) = %s",
+        (today_md,)
+    ).fetchall()
+
+    for aniv in aniversariantes:
+        # Verificar se já enviou celebração hoje para esse aniversariante
+        celeb_hoje = db.execute(
+            "SELECT COUNT(*) as cnt FROM celebracoes WHERE author_key=%s AND target_user_key=%s AND DATE(created_at)=%s",
+            (user["key"], aniv["key"], hoje)
+        ).fetchone()
+        concluida = (celeb_hoje["cnt"] if celeb_hoje else 0) > 0
+
+        result.append({
+            "id": f"aniversario_{aniv['key']}",
+            "titulo": f"Celebrar {aniv['name']}",
+            "descricao": "Aniversário hoje — envie uma celebração e ganhe DCoins",
+            "tipo": "aniversario",
+            "destinatario_id": aniv["key"],
+            "destinatario_nome": aniv["name"],
+            "destinatario_initials": aniv["initials"],
+            "destinatario_color": aniv["color"],
+            "prazo": hoje,
+            "concluida": concluida,
+            "criado_por": None,
+            "criador_nome": None,
+        })
+
+    return result
+
+
+def _is_gestor(user: dict) -> bool:
+    return bool(
+        user.get("is_admin") or
+        user.get("is_admin_user") or
+        user.get("is_rh") or
+        user.get("is_diretor") or
+        user.get("is_leader") or
+        user.get("org_position") in ("gestor", "lider")
+    )
+
+
+@app.post("/api/tarefas")
+def criar_tarefa(body: CriarTarefaRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _is_gestor(user):
+        raise HTTPException(status_code=403, detail="Apenas gestores, líderes, RH e diretores podem atribuir tarefas.")
+
+    safe_titulo = _sanitize_text(body.titulo)
+    safe_descricao = _sanitize_text(body.descricao) if body.descricao else ""
+    if not safe_titulo:
+        raise HTTPException(status_code=422, detail="Título é obrigatório.")
+
+    hoje = datetime.date.today().isoformat()
+    prazo = body.prazo
+    if prazo < hoje:
+        raise HTTPException(status_code=422, detail="Prazo não pode ser no passado.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    created = []
+    for dest_key in body.destinatarios:
+        dest = db.execute("SELECT key FROM users WHERE key=%s", (dest_key,)).fetchone()
+        if not dest:
+            continue
+        tid = str(uuid.uuid4())
+        db.execute(
+            """INSERT INTO tarefas (id, titulo, descricao, tipo, criado_por, destinatario_id, prazo, concluida, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,0,%s,%s)""",
+            (tid, safe_titulo, safe_descricao, "gestor", user["key"], dest_key, prazo, now, now)
+        )
+        created.append(tid)
+        _notify(db, title="📋 Nova tarefa atribuída",
+                message=f"{user['name']} atribuiu a tarefa: {safe_titulo}",
+                ntype="system", target_user_key=dest_key,
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=tid, play_sound=True)
+
+    db.commit()
+    return {"ok": True, "tarefas_criadas": len(created), "ids": created}
+
+
+@app.patch("/api/tarefas/{tarefa_id}/concluir")
+def concluir_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if tarefa["destinatario_id"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você não pode concluir uma tarefa que não é sua.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE tarefas SET concluida=1, concluida_em=%s, updated_at=%s WHERE id=%s",
+        (now, now, tarefa_id)
+    )
+    db.commit()
+    return {"ok": True}
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # NOTIFICATION SYSTEM
 # ═════════════════════════════════════════════════════════════════════════════
