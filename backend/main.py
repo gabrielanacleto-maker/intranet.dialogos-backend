@@ -2224,9 +2224,6 @@ def _is_gestor(user: dict) -> bool:
 
 @app.post("/api/tarefas")
 def criar_tarefa(body: CriarTarefaRequest, user=Depends(get_current_user), db=Depends(get_db)):
-    if not _is_gestor(user):
-        raise HTTPException(status_code=403, detail="Apenas gestores, líderes, RH e diretores podem atribuir tarefas.")
-
     safe_titulo = _sanitize_text(body.titulo)
     safe_descricao = _sanitize_text(body.descricao) if body.descricao else ""
     if not safe_titulo:
@@ -2237,9 +2234,18 @@ def criar_tarefa(body: CriarTarefaRequest, user=Depends(get_current_user), db=De
     if prazo < hoje:
         raise HTTPException(status_code=422, detail="Prazo não pode ser no passado.")
 
+    destinatarios = body.destinatarios or []
+    if not destinatarios:
+        destinatarios = [user["key"]]
+
+    # Se tentar atribuir para outra pessoa, precisa ser gestor
+    outros = [k for k in destinatarios if k != user["key"]]
+    if outros and not _is_gestor(user):
+        raise HTTPException(status_code=403, detail="Apenas gestores podem atribuir tarefas para outras pessoas.")
+
     now = datetime.datetime.utcnow().isoformat()
     created = []
-    for dest_key in body.destinatarios:
+    for dest_key in destinatarios:
         dest = db.execute("SELECT key FROM users WHERE key=%s", (dest_key,)).fetchone()
         if not dest:
             continue
@@ -2250,11 +2256,12 @@ def criar_tarefa(body: CriarTarefaRequest, user=Depends(get_current_user), db=De
             (tid, safe_titulo, safe_descricao, "gestor", user["key"], dest_key, prazo, now, now)
         )
         created.append(tid)
-        _notify(db, title="📋 Nova tarefa atribuída",
-                message=f"{user['name']} atribuiu a tarefa: {safe_titulo}",
-                ntype="system", target_user_key=dest_key,
-                sender_key=user["key"], sender_name=user["name"],
-                reference_id=tid, play_sound=True)
+        if dest_key != user["key"]:
+            _notify(db, title="📋 Nova tarefa atribuída",
+                    message=f"{user['name']} atribuiu a tarefa: {safe_titulo}",
+                    ntype="system", target_user_key=dest_key,
+                    sender_key=user["key"], sender_name=user["name"],
+                    reference_id=tid, play_sound=True)
 
     db.commit()
     return {"ok": True, "tarefas_criadas": len(created), "ids": created}
