@@ -108,8 +108,9 @@ class OrganogramRequest(BaseModel):
     org_tier: str = 'colaborador'
 
 class MoodRequest(BaseModel):
-    mood: str
-    intensity: int
+    mood: Optional[str] = None
+    valor_humor: Optional[int] = None
+    intensity: Optional[int] = None
     reason: Optional[str] = None
 
 class PointsRequest(BaseModel):

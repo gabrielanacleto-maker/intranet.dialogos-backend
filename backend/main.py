@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -1554,19 +1554,50 @@ def save_organogram(entries: list[OrgEntry], user=Depends(require_level(2)), db=
 
 # ── MOOD ──────────────────────────────────────────────────────────────────────
 
+MOOD_VALUES = {1: "muito_triste", 2: "triste", 3: "neutro", 4: "feliz", 5: "muito_feliz"}
+MOOD_EMOJIS = {1: "\U0001F61E", 2: "\U0001F641", 3: "\U0001F610", 4: "\U0001F642", 5: "\U0001F604"}
+
+_mood_rate = {}
+
+def _check_mood_rate_limit(user_key: str):
+    hoje = datetime.date.today().isoformat()
+    key = f"mood:{user_key}:{hoje}"
+    count = _mood_rate.get(key, 0)
+    if count >= 5:
+        raise HTTPException(status_code=429, detail="Limite diário de 5 registros de humor atingido.")
+    _mood_rate[key] = count + 1
+
 @app.post("/api/mood")
-def save_mood(body: MoodRequest, user=Depends(get_current_user), db=Depends(get_db)):
+def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user), db=Depends(get_db)):
+    if body.valor_humor is not None:
+        if body.valor_humor not in MOOD_VALUES:
+            raise HTTPException(status_code=422, detail="valor_humor deve ser inteiro entre 1 e 5.")
+        mood_key = MOOD_VALUES[body.valor_humor]
+    elif body.mood:
+        mood_key = body.mood
+    else:
+        raise HTTPException(status_code=422, detail="Informe valor_humor (1-5) ou mood.")
+
+    _check_mood_rate_limit(user["key"])
+
+    intensity = body.intensity if body.intensity else None
+
     db.execute("""INSERT INTO mood_history (id, user_key, mood, intensity, reason, created_at)
         VALUES (%s,%s,%s,%s,%s,%s)""",
-        (str(uuid.uuid4()), user["key"], body.mood, body.intensity, body.reason or "",
+        (str(uuid.uuid4()), user["key"], mood_key, intensity, body.reason or "",
         datetime.datetime.utcnow().isoformat())
     )
     db.commit()
-    return {"ok": True}
+
+    ip = request.client.host if request.client else "desconhecido"
+    log_action(db, user["key"], user["key"], "Registro de Humor",
+               f"valor_humor={body.valor_humor or mood_key} IP={ip}")
+
+    return {"ok": True, "valor_humor": body.valor_humor or None}
 
 @app.get("/api/mood/history")
 def get_mood_history(user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute("SELECT * FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 30",
+    rows = db.execute("SELECT * FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 100",
                     (user["key"],)).fetchall()
     return [dict(r) for r in rows]
 
@@ -1575,6 +1606,199 @@ def reset_mood(user=Depends(get_current_user), db=Depends(get_db)):
     db.execute("DELETE FROM mood_history WHERE user_key=%s", (user["key"],))
     db.commit()
     return {"ok": True}
+
+
+# ── RELATÓRIO DE HUMOR ────────────────────────────────────────────────────────
+
+def _pode_ver_relatorio(user: dict, paciente_key: str) -> bool:
+    if user["key"] == paciente_key:
+        return True
+    if user.get("is_admin") or user.get("is_admin_user"):
+        return True
+    return False
+
+@app.get("/api/relatorio/humor/{paciente_key}")
+def get_relatorio_humor(paciente_key: str, data_inicio: str = None, data_fim: str = None,
+                        user=Depends(get_current_user), db=Depends(get_db)):
+    if not _pode_ver_relatorio(user, paciente_key):
+        raise HTTPException(status_code=403, detail="Sem permissão para ver relatório deste paciente.")
+
+    paciente = db.execute("SELECT key, name, photo_url FROM users WHERE key=%s", (paciente_key,)).fetchone()
+    if not paciente:
+        raise HTTPException(status_code=404, detail="Paciente não encontrado.")
+
+    conditions = ["user_key=%s"]
+    params = [paciente_key]
+    if data_inicio:
+        conditions.append("created_at >= %s")
+        params.append(data_inicio)
+    if data_fim:
+        conditions.append("created_at <= %s")
+        params.append(data_fim + "T23:59:59")
+
+    where = " AND ".join(conditions)
+    rows = db.execute(
+        f"SELECT * FROM mood_history WHERE {where} ORDER BY created_at ASC",
+        params
+    ).fetchall()
+
+    registros = [dict(r) for r in rows]
+
+    translated = []
+    for r in registros:
+        val = None
+        for v, k in MOOD_VALUES.items():
+            if r["mood"] == k:
+                val = v
+                break
+        translated.append({
+            "id": r["id"],
+            "data": r["created_at"][:10] if r["created_at"] else "",
+            "hora": r["created_at"][11:16] if r["created_at"] else "",
+            "valor_humor": val,
+            "emoji": MOOD_EMOJIS.get(val, "?"),
+            "label": MOOD_VALUES.get(val, r["mood"]),
+            "intensity": r.get("intensity"),
+            "reason": r.get("reason", ""),
+        })
+
+    valores = [t["valor_humor"] for t in translated if t["valor_humor"]]
+    media = sum(valores) / len(valores) if valores else 0
+    melhor = max(valores) if valores else None
+    pior = min(valores) if valores else None
+
+    melhor_dia = None
+    pior_dia = None
+    if melhor is not None:
+        melhores = [t for t in translated if t["valor_humor"] == melhor]
+        melhor_dia = melhores[0]["data"] if melhores else None
+    if pior is not None:
+        piores = [t for t in translated if t["valor_humor"] == pior]
+        pior_dia = piores[0]["data"] if piores else None
+
+    return {
+        "paciente": dict(paciente),
+        "periodo": {"inicio": data_inicio, "fim": data_fim},
+        "total": len(translated),
+        "media": round(media, 2),
+        "melhor_valor": melhor,
+        "melhor_dia": melhor_dia,
+        "pior_valor": pior,
+        "pior_dia": pior_dia,
+        "registros": translated,
+    }
+
+
+@app.get("/api/relatorio/humor/{paciente_key}/pdf")
+def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, data_fim: str = None,
+                                  user=Depends(get_current_user), db=Depends(get_db)):
+    if not _pode_ver_relatorio(user, paciente_key):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+
+    paciente = db.execute("SELECT key, name FROM users WHERE key=%s", (paciente_key,)).fetchone()
+    if not paciente:
+        raise HTTPException(status_code=404, detail="Paciente não encontrado.")
+
+    conditions = ["user_key=%s"]
+    params = [paciente_key]
+    if data_inicio:
+        conditions.append("created_at >= %s")
+        params.append(data_inicio)
+    if data_fim:
+        conditions.append("created_at <= %s")
+        params.append(data_fim + "T23:59:59")
+
+    where = " AND ".join(conditions)
+    rows = db.execute(
+        f"SELECT * FROM mood_history WHERE {where} ORDER BY created_at ASC",
+        params
+    ).fetchall()
+
+    registros = [dict(r) for r in rows]
+
+    from fpdf import FPDF
+    import os
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=20)
+
+    # Logo
+    logo_path = os.path.join("..", "frontend", "public", "logo-clinica-fivecon.ico")
+    if os.path.exists(logo_path):
+        pdf.image(logo_path, x=10, y=10, w=12)
+
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "Clinica Dialogos - Relatorio de Humor", new_x="LMARGIN", new_y="NEXT", align="C")
+
+    pdf.set_font("Helvetica", "", 11)
+    pdf.cell(0, 8, f"Paciente: {paciente['name']}", new_x="LMARGIN", new_y="NEXT")
+    periodo = f"{data_inicio or 'inicio'} a {data_fim or 'hoje'}"
+    pdf.cell(0, 8, f"Periodo: {periodo}", new_x="LMARGIN", new_y="NEXT")
+
+    valores_pdf = []
+    translated_pdf = []
+    for r in registros:
+        val = None
+        for v, k in MOOD_VALUES.items():
+            if r["mood"] == k:
+                val = v
+                break
+        translated_pdf.append({
+            "data": r["created_at"][:10] if r["created_at"] else "",
+            "hora": r["created_at"][11:16] if r["created_at"] else "",
+            "valor": val,
+            "label": MOOD_VALUES.get(val, r["mood"]),
+        })
+        if val:
+            valores_pdf.append(val)
+
+    media_val = sum(valores_pdf) / len(valores_pdf) if valores_pdf else 0
+    melhor_val = max(valores_pdf) if valores_pdf else None
+    pior_val = min(valores_pdf) if valores_pdf else None
+
+    pdf.ln(10)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Resumo", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 11)
+    pdf.cell(0, 7, f"Total de registros: {len(translated_pdf)}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 7, f"Humor medio: {media_val:.1f} / 5", new_x="LMARGIN", new_y="NEXT")
+    if melhor_val is not None:
+        pdf.cell(0, 7, f"Melhor humor: {melhor_val} - {MOOD_EMOJIS.get(melhor_val, '')}", new_x="LMARGIN", new_y="NEXT")
+    if pior_val is not None:
+        pdf.cell(0, 7, f"Pior humor: {pior_val} - {MOOD_EMOJIS.get(pior_val, '')}", new_x="LMARGIN", new_y="NEXT")
+
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Registros", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+
+    # Table header
+    col_w = [30, 20, 40, 60]
+    headers_pdf = ["Data", "Hora", "Humor", "Valor"]
+    for i, h in enumerate(headers_pdf):
+        pdf.cell(col_w[i], 7, h, border=1)
+    pdf.ln()
+
+    for t in translated_pdf:
+        pdf.cell(col_w[0], 6, t["data"], border=1)
+        pdf.cell(col_w[1], 6, t["hora"], border=1)
+        pdf.cell(col_w[2], 6, t["label"], border=1)
+        valor_str = str(t["valor"]) if t["valor"] else "-"
+        pdf.cell(col_w[3], 6, valor_str, border=1)
+        pdf.ln()
+
+    pdf.cell(0, 10, f"Emitido em: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
+
+    nome_arquivo = f"relatorio_humor_{paciente['name'].replace(' ', '_')}_{datetime.date.today().isoformat()}.pdf"
+    pdf_bytes = pdf.output(dest="S").encode("latin-1")
+
+    from starlette.responses import Response
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'}
+    )
 
 # ── PRICE DOCTORS (Tabela de Preços) ──────────────────────────────────────────
 
