@@ -1587,6 +1587,10 @@ def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user
         (str(uuid.uuid4()), user["key"], mood_key, intensity, body.reason or "",
         datetime.datetime.utcnow().isoformat())
     )
+
+    _log_atividade(db, "humor", user["key"],
+                   f"{user['name']} respondeu o Termômetro do Humor")
+
     db.commit()
 
     ip = request.client.host if request.client else "desconhecido"
@@ -1799,6 +1803,60 @@ def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, dat
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'}
     )
+
+# ── ATIVIDADES DIÁLOGOS ───────────────────────────────────────────────────────
+
+def _log_atividade(db, tipo: str, autor_key: str, descricao: str, target_key: str = None, target_nome: str = None):
+    db.execute(
+        """INSERT INTO atividades_dialogos (id, tipo, autor_key, target_key, target_nome, descricao, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+        (str(uuid.uuid4()), tipo, autor_key, target_key, target_nome,
+         descricao, datetime.datetime.utcnow().isoformat())
+    )
+
+
+@app.get("/api/atividades")
+def listar_atividades(limit: int = 50, user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute(
+        """SELECT a.*, u.name AS autor_nome, u.initials AS autor_initials,
+                  u.color AS autor_color, u.photo_url AS autor_photo
+           FROM atividades_dialogos a
+           LEFT JOIN users u ON u.key = a.autor_key
+           ORDER BY a.created_at DESC LIMIT %s""",
+        (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+class ParabensRequest(BaseModel):
+    target_key: str
+    mensagem: str
+
+
+@app.post("/api/atividades/parabens")
+def criar_parabens(body: ParabensRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    target_key = body.target_key.strip().lower() if body.target_key else ""
+    mensagem = _sanitize_text(body.mensagem or "")[:500]
+
+    if not target_key and not mensagem:
+        raise HTTPException(status_code=422, detail="Informe o destinatário ou mensagem.")
+
+    target_nome = None
+    if target_key and target_key != "@todos":
+        t = db.execute("SELECT name FROM users WHERE key=%s", (target_key,)).fetchone()
+        if not t:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        target_nome = t["name"]
+
+    alvo = target_nome or "@todos" if target_key == "@todos" else (target_nome or "equipe")
+    descricao = f"{user['name']} parabenizou {alvo}"
+    if mensagem:
+        descricao += f" — {mensagem}"
+
+    _log_atividade(db, "parabens", user["key"], descricao, target_key or "@todos", target_nome or "@todos")
+    db.commit()
+    return {"ok": True}
+
 
 # ── PRICE DOCTORS (Tabela de Preços) ──────────────────────────────────────────
 
@@ -2504,6 +2562,11 @@ def concluir_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(g
         "UPDATE tarefas SET concluida=1, concluida_em=%s, updated_at=%s WHERE id=%s",
         (now, now, tarefa_id)
     )
+
+    tipo_atv = "tarefa_gestor" if tarefa.get("tipo") == "gestor" else "tarefa_rotina"
+    _log_atividade(db, tipo_atv, user["key"],
+                   f"{user['name']} concluiu {'uma Tarefa do Gestor' if tipo_atv == 'tarefa_gestor' else 'uma Tarefa'}")
+
     db.commit()
     return {"ok": True}
 
