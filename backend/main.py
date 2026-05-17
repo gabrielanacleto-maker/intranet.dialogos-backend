@@ -1795,7 +1795,7 @@ def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, dat
     pdf.cell(0, 10, f"Emitido em: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
 
     nome_arquivo = f"relatorio_humor_{paciente['name'].replace(' ', '_')}_{datetime.date.today().isoformat()}.pdf"
-    pdf_bytes = pdf.output(dest="S").encode("latin-1")
+    pdf_bytes = pdf.output(dest="S")
 
     from starlette.responses import Response
     return Response(
