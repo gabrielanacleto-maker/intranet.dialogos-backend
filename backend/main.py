@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status, Request
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status, Request, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -158,6 +158,23 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             if not user_row:
                 raise HTTPException(status_code=401, detail="Usuário não encontrado")
             return dict(user_row)
+
+def get_current_user_from_token(token: str = Query(None), authorization: str = Header(None)):
+    jwt_token = None
+    if authorization and authorization.startswith('Bearer '):
+        jwt_token = authorization[7:]
+    elif token:
+        jwt_token = token
+    if not jwt_token:
+        raise HTTPException(status_code=401, detail="Token ausente")
+    payload = verify_token(jwt_token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Token inválido ou expirado")
+    with get_db_context() as db:
+        user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
+        if not user_row:
+            raise HTTPException(status_code=401, detail="Usuário não encontrado")
+        return dict(user_row)
 
 def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
         if not credentials:
@@ -1695,7 +1712,7 @@ def get_relatorio_humor(paciente_key: str, data_inicio: str = None, data_fim: st
 
 @app.get("/api/relatorio/humor/{paciente_key}/pdf")
 def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, data_fim: str = None,
-                                  user=Depends(get_current_user), db=Depends(get_db)):
+                                  user=Depends(get_current_user_from_token), db=Depends(get_db)):
     if not _pode_ver_relatorio(user, paciente_key):
         raise HTTPException(status_code=403, detail="Sem permissão.")
 
