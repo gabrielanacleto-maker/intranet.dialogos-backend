@@ -12,7 +12,7 @@ node_modules/
 frontend/node_modules/
 
 dist/
-frontend/
+frontend/dist/
 *.db
 uploads/
 .vscode/
