@@ -1791,9 +1791,9 @@ def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, dat
     pior_val = min(valores_pdf) if valores_pdf else None
 
     pdf.ln(10)
-    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_font("NotoEmoji", size=12)
     pdf.cell(0, 8, "Resumo", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 11)
+    pdf.set_font("NotoEmoji", size=11)
     pdf.cell(0, 7, f"Total de registros: {len(translated_pdf)}", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 7, f"Humor medio: {media_val:.1f} / 5", new_x="LMARGIN", new_y="NEXT")
     if melhor_val is not None:
@@ -1802,9 +1802,9 @@ def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, dat
         pdf.cell(0, 7, f"Pior humor: {pior_val} - {MOOD_EMOJIS.get(pior_val, '')}", new_x="LMARGIN", new_y="NEXT")
 
     pdf.ln(5)
-    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_font("NotoEmoji", size=12)
     pdf.cell(0, 8, "Registros", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 9)
+    pdf.set_font("NotoEmoji", size=9)
 
     # Table header
     col_w = [30, 20, 40, 60]
@@ -1821,6 +1821,7 @@ def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, dat
         pdf.cell(col_w[3], 6, valor_str, border=1)
         pdf.ln()
 
+    pdf.set_font("NotoEmoji", size=10)
     pdf.cell(0, 10, f"Emitido em: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
 
     nome_arquivo = f"relatorio_humor_{paciente['name'].replace(' ', '_')}_{datetime.date.today().isoformat()}.pdf"
