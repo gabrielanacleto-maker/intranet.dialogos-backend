@@ -1752,15 +1752,19 @@ def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, dat
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=20)
 
+    # Fonte com suporte a emojis
+    font_path = os.path.join(os.path.dirname(__file__), "fonts", "NotoEmoji-Regular.ttf")
+    pdf.add_font("NotoEmoji", "", font_path)
+
     # Logo
     logo_path = os.path.join("..", "frontend", "public", "logo-clinica-fivecon.ico")
     if os.path.exists(logo_path):
         pdf.image(logo_path, x=10, y=10, w=12)
 
-    pdf.set_font("Helvetica", "B", 16)
+    pdf.set_font("NotoEmoji", size=16)
     pdf.cell(0, 10, "Clinica Dialogos - Relatorio de Humor", new_x="LMARGIN", new_y="NEXT", align="C")
 
-    pdf.set_font("Helvetica", "", 11)
+    pdf.set_font("NotoEmoji", size=11)
     pdf.cell(0, 8, f"Paciente: {paciente['name']}", new_x="LMARGIN", new_y="NEXT")
     periodo = f"{data_inicio or 'inicio'} a {data_fim or 'hoje'}"
     pdf.cell(0, 8, f"Periodo: {periodo}", new_x="LMARGIN", new_y="NEXT")
