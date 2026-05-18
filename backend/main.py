@@ -459,22 +459,27 @@ def get_logs(user=Depends(require_level(2)), db=Depends(get_db)):
 # ── POSTS ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/posts")
-def get_posts(feed: str = "feed", user=Depends(get_current_user), db=Depends(get_db)):
+def get_posts(feed: str = "feed", limit: int = 20, offset: int = 0,
+              user=Depends(get_current_user), db=Depends(get_db)):
     social_room_id = extract_room_id(feed)
     if social_room_id:
         allowed, _ = can_access_social_room(db, social_room_id, user)
         if not allowed:
             raise HTTPException(status_code=403, detail="Sem acesso a esta sala.")
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
     rows = db.execute(
-        "SELECT * FROM posts WHERE feed=%s ORDER BY pinned DESC, created_at DESC", (feed,)
+        "SELECT * FROM posts WHERE feed=%s ORDER BY pinned DESC, created_at DESC LIMIT %s OFFSET %s",
+        (feed, limit, offset)
     ).fetchall()
+    total = db.execute("SELECT COUNT(*) FROM posts WHERE feed=%s", (feed,)).fetchone()[0]
     result = []
     for r in rows:
         d = dict(r)
         d["likes"] = json.loads(d.get("likes") or "[]")
         d["comments"] = json.loads(d.get("comments") or "[]")
         result.append(d)
-    return result
+    return {"posts": result, "total": total}
 
 @app.post("/api/posts")
 async def create_post(body: CreatePostRequest, user=Depends(get_current_user), db=Depends(get_db)):
@@ -489,7 +494,9 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
                         user["level"] in ["platina", "diamante"])
             if not can_post:
                 raise HTTPException(status_code=403, detail="Sem permissão para publicar no Feed Novidades.")
-        if body.feed == "internal":
+        if body.feed == "colaboradores":
+            pass  # All authenticated users can post
+        elif body.feed == "internal":
             role = (user.get("role") or "").lower()
             can_post = (
                 user.get("is_admin") or user.get("is_admin_user") or
