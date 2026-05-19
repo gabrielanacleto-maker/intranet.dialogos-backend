@@ -170,3 +170,36 @@ class CriarTarefaRequest(BaseModel):
 
 class ConcluirTarefaRequest(BaseModel):
     pass
+
+class NovaTarefaRequest(BaseModel):
+    titulo: str
+    descricao: Optional[str] = ""
+    tipo_tarefa: str = "tarefa"
+    prioridade: str = "media"
+    prazo: str
+    recorrencia: str = "nenhuma"
+    atribuir_para: Optional[str] = None
+
+class EditarTarefaRequest(BaseModel):
+    titulo: Optional[str] = None
+    descricao: Optional[str] = None
+    tipo_tarefa: Optional[str] = None
+    prioridade: Optional[str] = None
+    prazo: Optional[str] = None
+    recorrencia: Optional[str] = None
+    custom_status: Optional[str] = None
+
+class IniciarTarefaRequest(BaseModel):
+    pass
+
+class PausarTarefaRequest(BaseModel):
+    pass
+
+class InterromperTarefaRequest(BaseModel):
+    pass
+
+class ComentarTarefaRequest(BaseModel):
+    text: str
+
+class JustificarAtrasoRequest(BaseModel):
+    delay_reason: str

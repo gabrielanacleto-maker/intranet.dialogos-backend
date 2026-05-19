@@ -278,6 +278,7 @@ def login(body: LoginRequest, db=Depends(get_db)):
                 "is_diretor": user["is_diretor"], "is_leader": user["is_leader"],
                 "is_orcoma": user["is_orcoma"],
                 "nivel_dourado": bool(user.get("nivel_dourado")),
+                "org_position": user.get("org_position", "colaborador"),
                 "points": user["points"], "photo_url": user["photo_url"],
             }
         }
@@ -293,6 +294,7 @@ def auth_me(user=Depends(get_current_user)):
         "is_diretor": user["is_diretor"], "is_leader": user["is_leader"],
         "is_orcoma": user["is_orcoma"],
         "nivel_dourado": bool(user.get("nivel_dourado")),
+        "org_position": user.get("org_position", "colaborador"),
         "points": user["points"], "photo_url": user["photo_url"],
         "password_changed": user["password_changed"],
     }
@@ -2607,6 +2609,519 @@ def concluir_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(g
 
     db.commit()
     return {"ok": True}
+
+
+# ── TAREFAS — NOVAS ROTAS ─────────────────────────────────────────────────────
+
+def _can_assign(user: dict) -> bool:
+    return bool(
+        user.get("is_admin") or
+        user.get("is_admin_user") or
+        user.get("is_rh") or
+        user.get("is_diretor") or
+        user.get("is_leader") or
+        user.get("org_position") in ("gestor", "lider")
+    )
+
+
+@app.get("/api/tarefas/listar")
+def listar_tarefas(
+    filtro: str = "todas",
+    user=Depends(get_current_user),
+    db=Depends(get_db)
+):
+    hoje = datetime.date.today().isoformat()
+    agora = datetime.datetime.utcnow().isoformat()
+    user_key = user["key"]
+
+    # Auto-atualizar tarefas em andamento com prazo vencido para atrasadas
+    db.execute(
+        """UPDATE tarefas SET status = 'atrasada', delayed_at = %s
+           WHERE destinatario_id = %s
+           AND status = 'andamento'
+           AND prazo < %s
+           AND concluida = 0""",
+        (agora, user_key, hoje)
+    )
+
+    base_query = """SELECT t.*,
+           u.name AS destinatario_nome, u.initials AS destinatario_initials,
+           u.color AS destinatario_color,
+           c.name AS criador_nome,
+           d.name AS delegado_nome
+    FROM tarefas t
+    LEFT JOIN users u ON u.key = t.destinatario_id
+    LEFT JOIN users c ON c.key = t.criado_por
+    LEFT JOIN users d ON d.key = t.delegated_by
+    WHERE t.destinatario_id = %s AND t.concluida = 0"""
+
+    if filtro == "hoje":
+        query = base_query + " AND t.prazo = %s ORDER BY t.prazo ASC, t.created_at DESC"
+        rows = db.execute(query, (user_key, hoje)).fetchall()
+    elif filtro == "amanha":
+        amanha = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        query = base_query + " AND t.prazo = %s ORDER BY t.prazo ASC, t.created_at DESC"
+        rows = db.execute(query, (user_key, amanha)).fetchall()
+    elif filtro == "semana":
+        fim_semana = (datetime.date.today() + datetime.timedelta(days=7)).isoformat()
+        query = base_query + " AND t.prazo <= %s ORDER BY t.prazo ASC, t.created_at DESC"
+        rows = db.execute(query, (user_key, fim_semana)).fetchall()
+    else:
+        query = base_query + " ORDER BY t.prazo ASC, t.created_at DESC"
+        rows = db.execute(query, (user_key,)).fetchall()
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/tarefas/atribuidas")
+def listar_tarefas_atribuidas(
+    user=Depends(get_current_user),
+    db=Depends(get_db)
+):
+    hoje = datetime.date.today().isoformat()
+    agora = datetime.datetime.utcnow().isoformat()
+    user_key = user["key"]
+
+    # Auto-atualizar tarefas em andamento com prazo vencido
+    db.execute(
+        """UPDATE tarefas SET status = 'atrasada', delayed_at = %s
+           WHERE destinatario_id = %s
+           AND status = 'andamento'
+           AND prazo < %s
+           AND concluida = 0""",
+        (agora, user_key, hoje)
+    )
+
+    rows = db.execute(
+        """SELECT t.*,
+           u.name AS destinatario_nome, u.initials AS destinatario_initials,
+           u.color AS destinatario_color,
+           c.name AS criador_nome,
+           d.name AS delegado_nome
+        FROM tarefas t
+        LEFT JOIN users u ON u.key = t.destinatario_id
+        LEFT JOIN users c ON c.key = t.criado_por
+        LEFT JOIN users d ON d.key = t.delegated_by
+        WHERE t.destinatario_id = %s
+        AND t.criado_por != %s
+        AND t.concluida = 0
+        ORDER BY t.prazo ASC, t.created_at DESC""",
+        (user_key, user_key)
+    ).fetchall()
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/tarefas/historico")
+def listar_historico_tarefas(
+    status_filter: str = "",
+    colaborador_filter: str = "",
+    data_inicio: str = "",
+    data_fim: str = "",
+    user=Depends(get_current_user),
+    db=Depends(get_db)
+):
+    user_key = user["key"]
+    conditions = ["(t.destinatario_id = %s OR t.criado_por = %s)"]
+    params = [user_key, user_key]
+
+    if status_filter:
+        conditions.append("t.status = %s")
+        params.append(status_filter)
+    if colaborador_filter:
+        conditions.append("t.destinatario_id = %s")
+        params.append(colaborador_filter)
+    if data_inicio:
+        conditions.append("t.prazo >= %s")
+        params.append(data_inicio)
+    if data_fim:
+        conditions.append("t.prazo <= %s")
+        params.append(data_fim)
+
+    where = " AND ".join(conditions)
+    rows = db.execute(
+        f"""SELECT t.*,
+           u.name AS destinatario_nome, u.initials AS destinatario_initials,
+           u.color AS destinatario_color,
+           c.name AS criador_nome,
+           d.name AS delegado_nome
+        FROM tarefas t
+        LEFT JOIN users u ON u.key = t.destinatario_id
+        LEFT JOIN users c ON c.key = t.criado_por
+        LEFT JOIN users d ON d.key = t.delegated_by
+        WHERE {where}
+        AND (t.concluida = 1 OR t.status IN ('atrasada', 'interrompida', 'cancelada'))
+        ORDER BY t.updated_at DESC
+        LIMIT 200""",
+        params
+    ).fetchall()
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/tarefas/kpi")
+def get_tarefas_kpi(user=Depends(get_current_user), db=Depends(get_db)):
+    hoje = datetime.date.today().isoformat()
+    user_key = user["key"]
+
+    # Auto-atualizar atrasadas
+    agora = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE tarefas SET status = 'atrasada', delayed_at = %s WHERE destinatario_id = %s AND status = 'andamento' AND prazo < %s AND concluida = 0",
+        (agora, user_key, hoje)
+    )
+
+    pendentes = db.execute(
+        "SELECT COUNT(*) as c FROM tarefas WHERE destinatario_id = %s AND status = 'pendente' AND concluida = 0",
+        (user_key,)
+    ).fetchone()["c"]
+
+    andamento = db.execute(
+        "SELECT COUNT(*) as c FROM tarefas WHERE destinatario_id = %s AND status = 'andamento' AND concluida = 0",
+        (user_key,)
+    ).fetchone()["c"]
+
+    concluidas_hoje = db.execute(
+        "SELECT COUNT(*) as c FROM tarefas WHERE destinatario_id = %s AND concluida = 1 AND DATE(concluida_em) = %s",
+        (user_key, hoje)
+    ).fetchone()["c"]
+
+    atrasadas = db.execute(
+        "SELECT COUNT(*) as c FROM tarefas WHERE destinatario_id = %s AND status = 'atrasada' AND concluida = 0",
+        (user_key,)
+    ).fetchone()["c"]
+
+    tempo_total = db.execute(
+        "SELECT COALESCE(SUM(duration_seconds), 0) as s FROM tarefas WHERE destinatario_id = %s AND concluida = 1",
+        (user_key,)
+    ).fetchone()["s"]
+
+    return {
+        "pendentes": pendentes or 0,
+        "andamento": andamento or 0,
+        "concluidas_hoje": concluidas_hoje or 0,
+        "atrasadas": atrasadas or 0,
+        "tempo_produtivo": tempo_total or 0,
+    }
+
+
+@app.post("/api/tarefas/nova")
+def criar_nova_tarefa(
+    body: NovaTarefaRequest,
+    user=Depends(get_current_user),
+    db=Depends(get_db)
+):
+    safe_titulo = _sanitize_text(body.titulo)
+    safe_descricao = _sanitize_text(body.descricao) if body.descricao else ""
+    if not safe_titulo:
+        raise HTTPException(status_code=422, detail="Título é obrigatório.")
+
+    hoje = datetime.date.today().isoformat()
+    prazo = body.prazo
+    if prazo < hoje:
+        raise HTTPException(status_code=422, detail="Prazo não pode ser no passado.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    tid = str(uuid.uuid4())
+
+    destinatario_id = user["key"]
+    delegado_por = None
+
+    # Se usuário tem permissão para atribuir para outro
+    if body.atribuir_para and body.atribuir_para != user["key"]:
+        if not _can_assign(user):
+            raise HTTPException(status_code=403, detail="Você não tem permissão para atribuir tarefas.")
+        destinatario_id = body.atribuir_para
+        delegado_por = user["key"]
+
+    tipo = "tarefa"
+    if body.tipo_tarefa in ("reuniao", "treinamento", "palestra", "lembrete"):
+        tipo = body.tipo_tarefa
+
+    prioridade = body.prioridade if body.prioridade in ("alta", "media", "baixa") else "media"
+    recorrencia = body.recorrencia if body.recorrencia in ("diaria", "semanal", "mensal") else "nenhuma"
+
+    db.execute(
+        """INSERT INTO tarefas
+           (id, titulo, descricao, tipo, tipo_tarefa, prioridade, recorrencia,
+            criado_por, destinatario_id, prazo, status, concluida,
+            delegated_by, created_at, updated_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (tid, safe_titulo, safe_descricao, tipo, body.tipo_tarefa, prioridade, recorrencia,
+         user["key"], destinatario_id, prazo, 'pendente', 0,
+         delegado_por, now, now)
+    )
+
+    # Log tarefas history
+    _log_task_history(db, tid, "criada", user["key"], user["name"], f"Tarefa criada: {safe_titulo}")
+
+    if destinatario_id != user["key"]:
+        _notify(db, title="📋 Nova tarefa atribuída",
+                message=f"{user['name']} atribuiu a tarefa: {safe_titulo}",
+                ntype="system", target_user_key=destinatario_id,
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=tid, play_sound=True)
+
+    db.commit()
+    return {"ok": True, "id": tid}
+
+
+@app.patch("/api/tarefas/{tarefa_id}/iniciar")
+def iniciar_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if tarefa["destinatario_id"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você não pode iniciar uma tarefa que não é sua.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE tarefas SET status='andamento', started_at=%s, updated_at=%s WHERE id=%s",
+        (now, now, tarefa_id)
+    )
+    _log_task_history(db, tarefa_id, "iniciada", user["key"], user["name"], "Tarefa iniciada")
+    db.commit()
+    return {"ok": True}
+
+
+@app.patch("/api/tarefas/{tarefa_id}/pausar")
+def pausar_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if tarefa["destinatario_id"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você não pode pausar uma tarefa que não é sua.")
+    if tarefa["status"] != "andamento":
+        raise HTTPException(status_code=400, detail="Tarefa não está em andamento.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    started = tarefa.get("started_at")
+    elapsed = 0
+    if started:
+        try:
+            started_dt = datetime.datetime.fromisoformat(started)
+            now_dt = datetime.datetime.utcnow()
+            elapsed = int((now_dt - started_dt).total_seconds())
+        except:
+            pass
+
+    current_paused = tarefa.get("paused_seconds") or 0
+    new_paused = current_paused + elapsed
+
+    db.execute(
+        "UPDATE tarefas SET status='pendente', paused_seconds=%s, started_at=NULL, updated_at=%s WHERE id=%s",
+        (new_paused, now, tarefa_id)
+    )
+    _log_task_history(db, tarefa_id, "pausada", user["key"], user["name"], "Tarefa pausada")
+    db.commit()
+    return {"ok": True}
+
+
+@app.patch("/api/tarefas/{tarefa_id}/interromper")
+def interromper_tarefa(tarefa_id: str, body: InterromperTarefaRequest = None,
+                        user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if tarefa["destinatario_id"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você não pode interromper uma tarefa que não é sua.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE tarefas SET status='interrompida', updated_at=%s WHERE id=%s",
+        (now, tarefa_id)
+    )
+    _log_task_history(db, tarefa_id, "interrompida", user["key"], user["name"], "Tarefa interrompida")
+    db.commit()
+    return {"ok": True}
+
+
+@app.patch("/api/tarefas/{tarefa_id}/concluir-agora")
+def concluir_tarefa_agora(tarefa_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if tarefa["destinatario_id"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você não pode concluir uma tarefa que não é sua.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    started = tarefa.get("started_at")
+    paused = tarefa.get("paused_seconds") or 0
+    elapsed = 0
+    if started:
+        try:
+            started_dt = datetime.datetime.fromisoformat(started)
+            now_dt = datetime.datetime.utcnow()
+            elapsed = int((now_dt - started_dt).total_seconds())
+        except:
+            pass
+
+    total_duration = paused + elapsed
+
+    db.execute(
+        "UPDATE tarefas SET status='concluida', concluida=1, concluida_em=%s, ended_at=%s, duration_seconds=%s, started_at=NULL, updated_at=%s WHERE id=%s",
+        (now, now, total_duration, now, tarefa_id)
+    )
+
+    tipo_atv = "tarefa_gestor" if tarefa.get("tipo") == "gestor" else "tarefa_rotina"
+    _log_atividade(db, tipo_atv, user["key"],
+                   f"{user['name']} concluiu a tarefa: {tarefa.get('titulo', '')}")
+    _log_task_history(db, tarefa_id, "concluida", user["key"], user["name"],
+                      f"Tarefa concluída. Duração: {total_duration}s")
+
+    db.commit()
+    return {"ok": True}
+
+
+@app.patch("/api/tarefas/{tarefa_id}/justificar-atraso")
+def justificar_atraso(tarefa_id: str, body: JustificarAtrasoRequest,
+                       user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if tarefa["destinatario_id"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você não pode justificar esta tarefa.")
+    if not body.delay_reason or not body.delay_reason.strip():
+        raise HTTPException(status_code=422, detail="Motivo do atraso é obrigatório.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE tarefas SET status='atrasada', delay_reason=%s, delayed_at=%s, updated_at=%s WHERE id=%s",
+        (body.delay_reason.strip(), now, now, tarefa_id)
+    )
+    _log_task_history(db, tarefa_id, "atrasada", user["key"], user["name"],
+                      f"Atraso justificado: {body.delay_reason.strip()}")
+    db.commit()
+    return {"ok": True}
+
+
+@app.put("/api/tarefas/{tarefa_id}")
+def editar_tarefa(tarefa_id: str, body: EditarTarefaRequest,
+                   user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if tarefa["criado_por"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você só pode editar tarefas criadas por você.")
+
+    updates = []
+    params = []
+    for field in ("titulo", "descricao", "tipo_tarefa", "prioridade", "prazo", "recorrencia", "custom_status"):
+        val = getattr(body, field, None)
+        if val is not None:
+            if field == "titulo":
+                val = _sanitize_text(val)
+            elif field == "descricao":
+                val = _sanitize_text(val)
+            updates.append(f"{field} = %s")
+            params.append(val)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nenhum campo para atualizar.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    updates.append("updated_at = %s")
+    params.append(now)
+    params.append(tarefa_id)
+
+    db.execute(
+        f"UPDATE tarefas SET {', '.join(updates)} WHERE id = %s",
+        params
+    )
+    _log_task_history(db, tarefa_id, "editada", user["key"], user["name"], "Tarefa editada")
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/tarefas/{tarefa_id}")
+def excluir_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    if tarefa["criado_por"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você só pode excluir tarefas criadas por você.")
+
+    db.execute("DELETE FROM task_comments WHERE tarefa_id = %s", (tarefa_id,))
+    db.execute("DELETE FROM task_history WHERE tarefa_id = %s", (tarefa_id,))
+    db.execute("DELETE FROM tarefas WHERE id = %s", (tarefa_id,))
+
+    _log_atividade(db, "tarefa_excluida", user["key"],
+                   f"{user['name']} excluiu a tarefa: {tarefa.get('titulo', '')}")
+    db.commit()
+    return {"ok": True}
+
+
+# ── TASK COMMENTS ────────────────────────────────────────────────────────────
+
+@app.get("/api/tarefas/{tarefa_id}/comentarios")
+def get_task_comments(tarefa_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute(
+        "SELECT * FROM task_comments WHERE tarefa_id = %s ORDER BY created_at ASC",
+        (tarefa_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/tarefas/{tarefa_id}/comentarios")
+def add_task_comment(tarefa_id: str, body: ComentarTarefaRequest,
+                      user=Depends(get_current_user), db=Depends(get_db)):
+    tarefa = db.execute("SELECT * FROM tarefas WHERE id=%s", (tarefa_id,)).fetchone()
+    if not tarefa:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+
+    safe_text = _sanitize_text(body.text)
+    if not safe_text:
+        raise HTTPException(status_code=422, detail="Comentário vazio.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    cid = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO task_comments (id, tarefa_id, author_key, author_name, text, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+        (cid, tarefa_id, user["key"], user["name"], safe_text, now)
+    )
+    _log_task_history(db, tarefa_id, "comentario", user["key"], user["name"], f"Comentário: {safe_text[:100]}")
+    db.commit()
+    return {"ok": True, "id": cid}
+
+
+# ── TASK HISTORY ─────────────────────────────────────────────────────────────
+
+@app.get("/api/tarefas/{tarefa_id}/historico")
+def get_task_history(tarefa_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute(
+        "SELECT * FROM task_history WHERE tarefa_id = %s ORDER BY created_at ASC",
+        (tarefa_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _log_task_history(db, tarefa_id: str, action: str, actor_key: str,
+                       actor_name: str, detail: str = ""):
+    db.execute(
+        "INSERT INTO task_history (id, tarefa_id, action, actor_key, actor_name, detail, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (str(uuid.uuid4()), tarefa_id, action, actor_key, actor_name, detail,
+         datetime.datetime.utcnow().isoformat())
+    )
+
+
+# ── AGENDA / EVENTOS ─────────────────────────────────────────────────────────
+
+@app.get("/api/tarefas/eventos")
+def listar_eventos_tarefas(user=Depends(get_current_user), db=Depends(get_db)):
+    hoje = datetime.date.today().isoformat()
+    fim_semana = (datetime.date.today() + datetime.timedelta(days=7)).isoformat()
+    rows = db.execute(
+        """SELECT t.id, t.titulo, t.descricao, t.tipo_tarefa, t.prazo, t.prioridade,
+                  t.criado_por, u.name AS criador_nome
+           FROM tarefas t
+           LEFT JOIN users u ON u.key = t.criado_por
+           WHERE t.prazo BETWEEN %s AND %s
+           AND t.tipo_tarefa IN ('reuniao', 'treinamento', 'palestra', 'evento', 'lembrete')
+           AND (t.destinatario_id = %s OR t.criado_por = %s OR t.tipo_tarefa = 'evento')
+           ORDER BY t.prazo ASC""",
+        (hoje, fim_semana, user["key"], user["key"])
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
