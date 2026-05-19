@@ -124,23 +124,28 @@ cloudinary.config(
 
 app = FastAPI(title="Intranet Diálogos API", lifespan=lifespan)
 
+CORS_ORIGINS = os.getenv("CORS_ORIGINS")
+if CORS_ORIGINS:
+    origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
+else:
+    origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+        "http://localhost:3000",
+        "https://intranet-dialogos.vercel.app",
+        "https://intranet-dialogos-backend.onrender.com",
+    ]
+
 app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:4173",
-            "http://127.0.0.1:4173",
-            "http://localhost:3000",
-            "http://localhost:*",
-            "https://intranet-dialogos.vercel.app",
-            "https://intranet-dialogos-backend.onrender.com"
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        allow_origin_regex="http://localhost:\\d+",  # ✅ Regex localhost any port
-    )
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_origin_regex=r"https?://localhost(:\d+)?|https://.*\.vercel\.app",
+)
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
@@ -316,6 +321,7 @@ def list_users(user=Depends(get_current_user), db=Depends(get_db)):
             # Se não for admin level>=2, esconde dados sensíveis
             if user["access_level"] < 2:
                 d.pop("password_changed", None)
+                d.pop("access_level", None)
             result.append(d)
         return result
 
@@ -1893,7 +1899,7 @@ def criar_parabens(body: ParabensRequest, user=Depends(get_current_user), db=Dep
 # ── PRICE DOCTORS (Tabela de Preços) ──────────────────────────────────────────
 
 @app.get("/api/price-doctors")
-def get_price_doctors(folder_id: str, db=Depends(get_db)):
+def get_price_doctors(folder_id: str, user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute("SELECT * FROM price_doctors WHERE folder_id=%s ORDER BY position_order ASC",
                     (folder_id,)).fetchall()
     return [dict(r) for r in rows]
@@ -1925,7 +1931,7 @@ def delete_price_doctor(doctor_id: str, user=Depends(require_level(1)), db=Depen
     return {"ok": True}
 
 @app.get("/api/price-procedures/{doctor_id}")
-def get_price_procedures(doctor_id: str, db=Depends(get_db)):
+def get_price_procedures(doctor_id: str, user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute("SELECT * FROM price_procedures WHERE doctor_id=%s ORDER BY position_order ASC",
                     (doctor_id,)).fetchall()
     return [dict(r) for r in rows]
