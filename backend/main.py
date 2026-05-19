@@ -2610,6 +2610,33 @@ def concluir_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(g
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# BIRTHDAYS
+# ═════════════════════════════════════════════════════════════════════════════
+
+_birthday_cache = {"data": None, "timestamp": 0}
+
+@app.get("/api/birthdays/current-month")
+def get_current_month_birthdays(user=Depends(get_current_user), db=Depends(get_db)):
+    now = time.time()
+    if _birthday_cache["data"] and (now - _birthday_cache["timestamp"]) < 3600:
+        return _birthday_cache["data"]
+
+    current_month = datetime.date.today().month
+    rows = db.execute("""
+        SELECT id, nome, tipo, dia, mes, departamento, foto_url
+        FROM aniversarios
+        WHERE ativo = true
+          AND mes = %s
+        ORDER BY dia ASC
+    """, (current_month,)).fetchall()
+    result = [dict(r) for r in rows]
+
+    _birthday_cache["data"] = result
+    _birthday_cache["timestamp"] = now
+    return result
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # NOTIFICATION SYSTEM
 # ═════════════════════════════════════════════════════════════════════════════
 
