@@ -1967,6 +1967,27 @@ def delete_price_procedure(proc_id: str, user=Depends(require_level(1)), db=Depe
     db.commit()
     return {"ok": True}
 
+@app.get("/api/price-export/{folder_id}")
+def export_price_table(folder_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    doctors = db.execute("SELECT * FROM price_doctors WHERE folder_id=%s ORDER BY position_order ASC",
+                         (folder_id,)).fetchall()
+    doctor_ids = [d["id"] for d in doctors]
+    if doctor_ids:
+        placeholders = ",".join("%s" for _ in doctor_ids)
+        procs = db.execute(f"SELECT * FROM price_procedures WHERE doctor_id IN ({placeholders}) ORDER BY position_order ASC",
+                           doctor_ids).fetchall()
+    else:
+        procs = []
+    procs_by_doctor = {}
+    for p in procs:
+        procs_by_doctor.setdefault(p["doctor_id"], []).append(dict(p))
+    result = []
+    for d in doctors:
+        row = dict(d)
+        row["procedures"] = procs_by_doctor.get(d["id"], [])
+        result.append(row)
+    return result
+
 # ── CALENDAR EVENTS ───────────────────────────────────────────────────────────
 
 @app.get("/api/calendar")
