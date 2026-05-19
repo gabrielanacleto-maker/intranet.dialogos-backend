@@ -16,3 +16,4 @@ frontend/dist/
 *.db
 uploads/
 .vscode/
+frontend/
