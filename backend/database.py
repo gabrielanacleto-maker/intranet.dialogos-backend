@@ -255,6 +255,51 @@ def init_db():
                  'gabriel', '2026-04-22T00:00:00')
             )
 
+        # ── TAREFAS: add new columns ──────────────────────────────────────────
+        try:
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pendente'")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS custom_status TEXT DEFAULT NULL")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS prioridade TEXT DEFAULT 'media'")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS tipo_tarefa TEXT DEFAULT 'tarefa'")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS recorrencia TEXT DEFAULT 'nenhuma'")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS duration_seconds INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS started_at TEXT DEFAULT NULL")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS ended_at TEXT DEFAULT NULL")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS delay_reason TEXT DEFAULT NULL")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS delayed_at TEXT DEFAULT NULL")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS paused_seconds INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS delegated_by TEXT DEFAULT NULL")
+            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS concluida_em TEXT DEFAULT NULL")
+        except:
+            pass
+
+        # ── TASK COMMENTS ──────────────────────────────────────────────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS task_comments (
+                id TEXT PRIMARY KEY,
+                tarefa_id TEXT NOT NULL,
+                author_key TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (tarefa_id) REFERENCES tarefas(id)
+            )
+        """)
+
+        # ── TASK HISTORY ───────────────────────────────────────────────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS task_history (
+                id TEXT PRIMARY KEY,
+                tarefa_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                actor_key TEXT NOT NULL,
+                actor_name TEXT NOT NULL,
+                detail TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (tarefa_id) REFERENCES tarefas(id)
+            )
+        """)
+
         conn.commit()
         print("✅ Banco de dados inicializado.")
 
