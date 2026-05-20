@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 import os, uuid, shutil, datetime, json, re, time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 import logging
 
@@ -16,6 +16,7 @@ from auth import create_token, verify_token, hash_password, check_password
 
 import cloudinary
 import cloudinary.uploader
+import socketio
 
 
 UPLOAD_DIR = Path("uploads")
@@ -170,6 +171,76 @@ app.add_middleware(
 )
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+# Socket.IO server (real-time updates without polling)
+sio = socketio.Server(
+    async_mode="asgi",
+    cors_allowed_origins=origins,
+    logger=False,
+    engineio_logger=False,
+)
+
+def _extract_socket_token(environ, auth):
+    if isinstance(auth, dict) and auth.get("token"):
+        return auth.get("token")
+    header = environ.get("HTTP_AUTHORIZATION") or ""
+    if header.startswith("Bearer "):
+        return header[7:]
+    qs = parse_qs(environ.get("QUERY_STRING", ""))
+    if qs.get("token"):
+        return qs["token"][0]
+    return None
+
+@sio.event
+def connect(sid, environ, auth=None):
+    token = _extract_socket_token(environ, auth)
+    if not token:
+        raise ConnectionRefusedError("unauthorized")
+    payload = verify_token(token)
+    if not payload or not payload.get("sub"):
+        raise ConnectionRefusedError("unauthorized")
+    with get_db_context() as db:
+        user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
+        if not user_row:
+            raise ConnectionRefusedError("unauthorized")
+        user = dict(user_row)
+    sio.save_session(sid, {"user_key": user["key"], "dept": user.get("dept", "")})
+    sio.enter_room(sid, "all")
+    sio.enter_room(sid, f"user:{user['key']}")
+    if user.get("dept"):
+        sio.enter_room(sid, f"dept:{user['dept']}")
+    sio.emit("user_online", {"user_key": user["key"]}, room="all")
+
+@sio.event
+def disconnect(sid):
+    try:
+        session = sio.get_session(sid)
+    except Exception:
+        session = None
+    if session and session.get("user_key"):
+        sio.emit("user_offline", {"user_key": session["user_key"]}, room="all")
+
+@sio.event
+def join(sid, data):
+    room = (data or {}).get("room")
+    if room:
+        sio.enter_room(sid, room)
+
+@sio.event
+def leave(sid, data):
+    room = (data or {}).get("room")
+    if room:
+        sio.leave_room(sid, room)
+
+def ws_emit(event: str, payload: dict, rooms=None):
+    try:
+        if rooms:
+            for room in rooms:
+                sio.emit(event, payload, room=room)
+            return
+        sio.emit(event, payload, room="all")
+    except Exception:
+        logger.exception("socket_emit_failed event=%s", event)
 
 security = HTTPBearer(auto_error=False)
 
@@ -625,6 +696,28 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
                         sender_key=user["key"], sender_name=user["name"],
                         reference_id=post_id, play_sound=True)
         db.commit()
+        ws_emit("new_post", {
+            "id": post_id,
+            "feed": body.feed,
+            "author_key": user["key"],
+            "author_name": user["name"],
+            "author_initials": user["initials"],
+            "author_color": user["color"],
+            "author_photo_url": user.get("photo_url", ""),
+            "author_role": user.get("role", ""),
+            "author_is_rh": bool(user.get("is_rh")),
+            "author_is_admin": bool(user.get("is_admin")),
+            "text": safe_text,
+            "image_url": safe_image,
+            "video_url": safe_video,
+            "embed_url": safe_embed,
+            "access_level": body.access_level,
+            "comunicado_tipo": body.comunicado_tipo,
+            "pinned": 0,
+            "likes": [],
+            "comments": [],
+            "created_at": datetime.datetime.utcnow().isoformat(),
+        }, rooms=[f"feed:{body.feed}", "all"])
         return {"ok": True, "id": post_id}
     except Exception as e:
         print(f"POST error: {e}")  # Backend log
@@ -671,8 +764,10 @@ def delete_post(post_id: str, user=Depends(get_current_user), db=Depends(get_db)
         raise HTTPException(status_code=404)
     if post["author_key"] != user["key"] and not (user["is_admin"] or user["is_admin_user"]):
         raise HTTPException(status_code=403)
+    feed = post["feed"]
     db.execute("DELETE FROM posts WHERE id=%s", (post_id,))
     db.commit()
+    ws_emit("delete_post", {"id": post_id, "feed": feed}, rooms=[f"feed:{feed}", "all"])
     return {"ok": True}
 
 @app.post("/api/posts/{post_id}/pin")
@@ -683,6 +778,7 @@ def pin_post(post_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
     new_pin = 0 if post["pinned"] else 1
     db.execute("UPDATE posts SET pinned=%s WHERE id=%s", (new_pin, post_id))
     db.commit()
+    ws_emit("update_post", {"id": post_id, "feed": post["feed"], "pinned": new_pin}, rooms=[f"feed:{post['feed']}", "all"])
     return {"pinned": bool(new_pin)}
 
 @app.post("/api/posts/{post_id}/like")
@@ -706,6 +802,7 @@ def toggle_like(post_id: str, user=Depends(get_current_user), db=Depends(get_db)
                 sender_key=user["key"], sender_name=user["name"],
                 reference_id=post_id, play_sound=True)
     db.commit()
+    ws_emit("update_post", {"id": post_id, "feed": post["feed"], "likes": likes}, rooms=[f"feed:{post['feed']}", "all"])
     return {"likes": likes}
 
 @app.post("/api/posts/{post_id}/comment")
@@ -748,6 +845,7 @@ def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_use
                     sender_key=user["key"], sender_name=user["name"],
                     reference_id=post_id, play_sound=True)
     db.commit()
+    ws_emit("update_post", {"id": post_id, "feed": post["feed"], "comments": comments}, rooms=[f"feed:{post['feed']}", "all"])
     return {"comments": comments}
 
 # ── POST VIEWS ─────────────────────────────────────────────────────────────────
@@ -980,6 +1078,7 @@ def presence_heartbeat(user=Depends(get_current_user), db=Depends(get_db)):
         db.execute("INSERT INTO presence (user_key, is_online, last_seen, last_activity) VALUES (%s,1,%s,%s)",
                    (user["key"], now, now))
     db.commit()
+    ws_emit("user_online", {"user_key": user["key"], "last_activity": now})
     return {"ok": True}
 
 @app.post("/api/presence/logout")
@@ -987,6 +1086,7 @@ def presence_logout(user=Depends(get_current_user), db=Depends(get_db)):
     now = datetime.datetime.utcnow().isoformat()
     db.execute("UPDATE presence SET is_online=0, last_seen=%s WHERE user_key=%s", (now, user["key"]))
     db.commit()
+    ws_emit("user_offline", {"user_key": user["key"], "last_seen": now})
     return {"ok": True}
 
 @app.get("/api/presence")
@@ -1512,6 +1612,7 @@ def create_ouvidoria(body: OuvidoriaRequest, user=Depends(get_current_user), db=
         datetime.datetime.utcnow().isoformat())
     )
     db.commit()
+    ws_emit("objective_updated", {"type": "created", "id": oid, "user_key": user["key"]})
     return {"ok": True, "id": oid}
 
 @app.put("/api/ouvidoria/{oid}/status")
@@ -1869,12 +1970,26 @@ def download_relatorio_humor_pdf(paciente_key: str, data_inicio: str = None, dat
 # ── ATIVIDADES DIÁLOGOS ───────────────────────────────────────────────────────
 
 def _log_atividade(db, tipo: str, autor_key: str, descricao: str, target_key: str = None, target_nome: str = None):
+    activity_id = str(uuid.uuid4())
+    created_at = datetime.datetime.utcnow().isoformat()
     db.execute(
         """INSERT INTO atividades_dialogos (id, tipo, autor_key, target_key, target_nome, descricao, created_at)
            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-        (str(uuid.uuid4()), tipo, autor_key, target_key, target_nome,
-         descricao, datetime.datetime.utcnow().isoformat())
+        (activity_id, tipo, autor_key, target_key, target_nome, descricao, created_at)
     )
+    with get_db_context() as db2:
+        user_row = db2.execute("SELECT name, initials, photo_url FROM users WHERE key=%s", (autor_key,)).fetchone()
+    payload = {
+        "id": activity_id,
+        "tipo": _sanitize_text(tipo)[:30],
+        "descricao": _sanitize_text(descricao)[:400],
+        "created_at": created_at,
+        "autor_key": autor_key,
+        "autor_nome": user_row["name"] if user_row else "",
+        "autor_initials": user_row["initials"] if user_row else "",
+        "autor_photo": user_row["photo_url"] if user_row else "",
+    }
+    ws_emit("new_activity", payload)
 
 def _normalize_atividade_row(row: dict):
     # Security: response allowlist + sanitization mitigates XSS/injection in UI.
@@ -2424,6 +2539,7 @@ def atualizar_objetivo(oid: str, body: dict = None, user=Depends(get_current_use
                 (datetime.datetime.utcnow().isoformat(), oid)
             )
         db.commit()
+        ws_emit("objective_updated", {"type": "updated", "id": oid, "user_key": user["key"]})
     return {"ok": True}
 
 @app.delete("/api/objetivos/{oid}")
@@ -2433,6 +2549,7 @@ def deletar_objetivo(oid: str, user=Depends(get_current_user), db=Depends(get_db
     db.execute("DELETE FROM objetivos_progress WHERE objetivo_id=%s", (oid,))
     db.execute("DELETE FROM objetivos_def WHERE id=%s", (oid,))
     db.commit()
+    ws_emit("objective_updated", {"type": "deleted", "id": oid, "user_key": user["key"]})
     return {"ok": True}
 
 @app.post("/api/objetivos/{oid}/progresso")
@@ -2472,6 +2589,8 @@ def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_us
             _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"],
                           f"Objetivo concluído: {objetivo['nome']}")
     db.commit()
+    event_name = "objective_completed" if novo_status == "concluido" else "objective_updated"
+    ws_emit(event_name, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso})
     return {"ok": True}
 
 @app.post("/api/objetivos/reset")
@@ -2500,6 +2619,7 @@ def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
             )
             resetados += db.execute("SELECT changes()").fetchone()[0]
     db.commit()
+    ws_emit("objective_updated", {"type": "reset", "resetados": resetados, "user_key": user["key"]})
     return {"ok": True, "resetados": resetados}
 
 def _award_dcoins(db, user_key, coins, reason):
@@ -3329,11 +3449,19 @@ def get_task_history(tarefa_id: str, user=Depends(get_current_user), db=Depends(
 
 def _log_task_history(db, tarefa_id: str, action: str, actor_key: str,
                        actor_name: str, detail: str = ""):
+    created_at = datetime.datetime.utcnow().isoformat()
     db.execute(
         "INSERT INTO task_history (id, tarefa_id, action, actor_key, actor_name, detail, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-        (str(uuid.uuid4()), tarefa_id, action, actor_key, actor_name, detail,
-         datetime.datetime.utcnow().isoformat())
+        (str(uuid.uuid4()), tarefa_id, action, actor_key, actor_name, detail, created_at)
     )
+    ws_emit("task_updated", {
+        "id": tarefa_id,
+        "action": action,
+        "actor_key": actor_key,
+        "actor_name": actor_name,
+        "detail": detail,
+        "created_at": created_at,
+    })
 
 
 # ── AGENDA / EVENTOS ─────────────────────────────────────────────────────────
@@ -3456,16 +3584,39 @@ def _notify(db, *, title: str, message: str, ntype: str,
     """Insert a notification. Call after the main operation succeeds."""
     import uuid, datetime
     _ensure_notifications_table(db)
+    notif_id = str(uuid.uuid4())
+    created_at = datetime.datetime.utcnow().isoformat()
+    resolved_audience = audience or ('personal' if target_user_key else 'all')
     db.execute(
         """INSERT INTO notifications
         (id, title, message, type, target_user_key, audience,
             sender_key, sender_name, reference_id, play_sound, is_read, created_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (str(uuid.uuid4()), title, message, ntype,
-        target_user_key, audience or ('personal' if target_user_key else 'all'),
+        (notif_id, title, message, ntype,
+        target_user_key, resolved_audience,
         sender_key, sender_name, reference_id, play_sound, False,
-        datetime.datetime.utcnow().isoformat())
+        created_at)
     )
+    payload = {
+        "id": notif_id,
+        "title": title,
+        "message": message,
+        "type": ntype,
+        "target_user_key": target_user_key,
+        "audience": resolved_audience,
+        "sender_key": sender_key,
+        "sender_name": sender_name,
+        "reference_id": reference_id,
+        "play_sound": play_sound,
+        "is_read": False,
+        "created_at": created_at,
+    }
+    rooms = ["all"]
+    if target_user_key:
+        rooms = [f"user:{target_user_key}"]
+    elif resolved_audience and resolved_audience not in ("all", "personal"):
+        rooms = [f"dept:{resolved_audience}"]
+    ws_emit("notification_created", payload, rooms=rooms)
 
 
 def _extract_mentions(text: str):
@@ -3827,3 +3978,6 @@ def set_org_position(body: SetOrgPositionRequest, user=Depends(get_current_user)
         f"org_position definido como: {body.org_position}"
     )
     return {"ok": True}
+
+# Expose a unified ASGI app (FastAPI + Socket.IO)
+app = socketio.ASGIApp(sio, app)
