@@ -34,6 +34,8 @@ TRUSTED_EMBED_DOMAINS = {"instagram.com", "tiktok.com", "youtube.com", "youtu.be
 _upload_limits = {}
 _birthday_limits = {}
 _activity_limits = {}
+_objective_limits = {}
+_idempotency_keys = {}
 logger = logging.getLogger("dialogos.security")
 
 def _check_upload_rate_limit(user_key: str):
@@ -2558,18 +2560,92 @@ def deletar_objetivo(oid: str, user=Depends(get_current_user), db=Depends(get_db
     ws_emit("objective_updated", {"type": "deleted", "id": oid, "user_key": user["key"]})
     return {"ok": True}
 
+def _check_objective_rate_limit(user_key: str):
+    now = time.time()
+    minute = int(now / 15)
+    key = f"obj:{user_key}:{minute}"
+    count = _objective_limits.get(key, 0)
+    if count >= 5:
+        raise HTTPException(status_code=429, detail="Limite de ações em objetivos excedido. Aguarde alguns segundos.")
+    _objective_limits[key] = count + 1
+
+def _log_objective_audit(db, objetivo_id, user_key, action, detail=""):
+    request = getattr(_log_objective_audit, "_request", None)
+    ip = ""
+    if request:
+        ip = request.client.host if hasattr(request, "client") and request.client else ""
+    db.execute(
+        "INSERT INTO objetivos_audit_log (id, objetivo_id, user_key, action, detail, ip_address, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (str(uuid.uuid4()), objetivo_id, user_key, action, detail, ip, datetime.datetime.utcnow().isoformat())
+    )
+
+def _update_streak(db, user_key):
+    hoje = datetime.datetime.utcnow().date().isoformat()
+    streak = db.execute("SELECT * FROM objetivos_streaks WHERE user_key=%s", (user_key,)).fetchone()
+    if streak:
+        if streak["last_date"] == hoje:
+            return streak["current_streak"]
+        yesterday = (datetime.datetime.utcnow().date() - datetime.timedelta(days=1)).isoformat()
+        if streak["last_date"] == yesterday:
+            novo = streak["current_streak"] + 1
+        else:
+            novo = 1
+        novo_max = max(novo, streak["max_streak"])
+        db.execute(
+            "UPDATE objetivos_streaks SET current_streak=%s, max_streak=%s, last_date=%s, updated_at=%s WHERE user_key=%s",
+            (novo, novo_max, hoje, datetime.datetime.utcnow().isoformat(), user_key)
+        )
+        return novo
+    else:
+        sid = str(uuid.uuid4())
+        now = datetime.datetime.utcnow().isoformat()
+        db.execute(
+            "INSERT INTO objetivos_streaks (id, user_key, current_streak, max_streak, last_date, updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (sid, user_key, 1, 1, hoje, now)
+        )
+        return 1
+
 @app.post("/api/objetivos/{oid}/progresso")
-def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db)):
+def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
+    _log_objective_audit._request = request
+    _check_objective_rate_limit(user["key"])
+
+    idempotency_key = (body or {}).get("idempotency_key")
+    if idempotency_key:
+        if idempotency_key in _idempotency_keys:
+            return {"ok": True, "idempotent": True}
+        _idempotency_keys[idempotency_key] = True
+
     objetivo = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
     if not objetivo:
         raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
     if not objetivo["ativo"]:
         raise HTTPException(status_code=403, detail="Este objetivo está bloqueado.")
+
     now = datetime.datetime.utcnow().isoformat()
+    hoje = datetime.datetime.utcnow().date().isoformat()
+    dia_semana = datetime.datetime.utcnow().weekday()
+    dia_mes = datetime.datetime.utcnow().day
+
     prog = db.execute(
         "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
         (oid, user["key"])
     ).fetchone()
+
+    # Validate period for already completed objectives
+    if prog and prog["status"] == "concluido":
+        if objetivo["periodicidade"] == "diaria":
+            if prog["ultima_atualizacao"][:10] == hoje:
+                raise HTTPException(status_code=409, detail="Objetivo diário já concluído hoje.")
+        elif objetivo["periodicidade"] == "semanal":
+            ultima_semana = datetime.datetime.fromisoformat(prog["ultima_atualizacao"]).date().isocalendar()[1]
+            if ultima_semana == datetime.datetime.utcnow().date().isocalendar()[1]:
+                raise HTTPException(status_code=409, detail="Objetivo semanal já concluído esta semana.")
+        elif objetivo["periodicidade"] == "mensal":
+            ultima_dt = datetime.datetime.fromisoformat(prog["ultima_atualizacao"]).date()
+            if ultima_dt.year == datetime.datetime.utcnow().date().year and ultima_dt.month == datetime.datetime.utcnow().date().month:
+                raise HTTPException(status_code=409, detail="Objetivo mensal já concluído este mês.")
+
     increment = (body or {}).get("incremento", 1)
     if prog:
         novo_progresso = (prog["progresso_atual"] or 0) + increment
@@ -2590,14 +2666,19 @@ def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_us
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
             (pid, oid, user["key"], novo_progresso, novo_status, now, now, now)
         )
-        # Dar D-Cash se concluiu
-        if novo_status == "concluido":
-            _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"],
-                          f"Objetivo concluído: {objetivo['nome']}")
+
+    if novo_status == "concluido":
+        _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"],
+                      f"Objetivo concluído: {objetivo['nome']}")
+        _update_streak(db, user["key"])
+
+    _log_objective_audit(db, oid, user["key"], "progresso",
+                         f"Progresso atualizado para {novo_progresso}/{objetivo['meta_valor']} (status: {novo_status})")
+
     db.commit()
     event_name = "objective_completed" if novo_status == "concluido" else "objective_updated"
     ws_emit_to_user(user["key"], event_name, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso})
-    return {"ok": True}
+    return {"ok": True, "status": novo_status, "progresso": novo_progresso}
 
 @app.post("/api/objetivos/reset")
 def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
@@ -2605,7 +2686,7 @@ def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
     dia_semana = datetime.datetime.utcnow().weekday()
     dia_mes = datetime.datetime.utcnow().day
     resetados = 0
-    afetados = {}  # user_key -> list of objective_ids that were uncompleted
+    afetados = {}
     objetivos = db.execute("SELECT * FROM objetivos_def WHERE ativo=1").fetchall()
     for obj in objetivos:
         deve_resetar = False
@@ -2653,11 +2734,192 @@ def _award_dcoins(db, user_key, coins, reason):
     )
     new_total = (target["points"] or 0) + coins
     db.execute("UPDATE users SET points=%s WHERE key=%s", (new_total, user_key))
-    _notify(db, title="🎯 D-Cash recebido",
+    _notify(db, title="D-Cash recebido",
             message=f"Você ganhou {coins} D-Cash por: {reason}",
             ntype="xp", target_user_key=user_key,
             sender_key="system", sender_name="Sistema",
             reference_id=pid, play_sound=True)
+
+@app.get("/api/objetivos/stats")
+def objetivos_stats(user=Depends(get_current_user), db=Depends(get_db)):
+    key = user["key"]
+    total = db.execute("SELECT COUNT(*) as cnt FROM objetivos_def WHERE ativo=1").fetchone()["cnt"] or 0
+    concluidos = db.execute(
+        "SELECT COUNT(*) as cnt FROM objetivos_progress WHERE user_key=%s AND status='concluido'",
+        (key,)
+    ).fetchone()["cnt"] or 0
+    dcoins_row = db.execute(
+        "SELECT COALESCE(SUM(points),0) as total FROM user_points WHERE user_key=%s AND action_type='objetivo'",
+        (key,)
+    ).fetchone()
+    dcoins_ganhos = dcoins_row["total"] if dcoins_row else 0
+    streak = db.execute("SELECT * FROM objetivos_streaks WHERE user_key=%s", (key,)).fetchone()
+    streak_data = dict(streak) if streak else {"current_streak": 0, "max_streak": 0}
+    my_ranking = db.execute(
+        "SELECT COUNT(*) + 1 as pos FROM users WHERE points > (SELECT COALESCE(points,0) FROM users WHERE key=%s)",
+        (key,)
+    ).fetchone()["pos"] if db.execute("SELECT points FROM users WHERE key=%s", (key,)).fetchone() else 0
+    return {
+        "total": total,
+        "concluidos": concluidos,
+        "dcoins_ganhos": dcoins_ganhos,
+        "dcoins_disponiveis": user.get("points", 0),
+        "streak": streak_data,
+        "rank": my_ranking,
+    }
+
+@app.get("/api/objetivos/streak")
+def objetivos_streak(user=Depends(get_current_user), db=Depends(get_db)):
+    streak = db.execute("SELECT * FROM objetivos_streaks WHERE user_key=%s", (user["key"],)).fetchone()
+    return dict(streak) if streak else {"current_streak": 0, "max_streak": 0, "last_date": None}
+
+@app.get("/api/objetivos/leaderboard")
+def objetivos_leaderboard(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""
+        SELECT u.key, u.name, u.initials, u.color, u.photo_url,
+               COALESCE(u.points, 0) as d_cash_total,
+               COALESCE((
+                   SELECT COUNT(*) FROM objetivos_progress op
+                   JOIN objetivos_def od ON od.id = op.objetivo_id
+                   WHERE op.user_key = u.key AND op.status = 'concluido' AND od.ativo = 1
+               ), 0) as objetivos_concluidos
+        FROM users u
+        ORDER BY u.points DESC
+        LIMIT 10
+    """).fetchall()
+    top10 = []
+    for i, r in enumerate(rows, 1):
+        d = dict(r)
+        d["position"] = i
+        top10.append(d)
+    my_pos = next((i+1 for i, u in enumerate(
+        db.execute("SELECT key FROM users ORDER BY points DESC").fetchall()
+    ) if u["key"] == user["key"]), None)
+    return {"top10": top10, "myPosition": my_pos}
+
+@app.get("/api/objetivos/{oid}/audit")
+def objetivo_audit_log(oid: str, user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute(
+        "SELECT * FROM objetivos_audit_log WHERE objetivo_id=%s ORDER BY created_at DESC LIMIT 50",
+        (oid,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/objetivos/{oid}/concluir")
+def concluir_objetivo(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
+    _log_objective_audit._request = request
+    _check_objective_rate_limit(user["key"])
+
+    idempotency_key = (body or {}).get("idempotency_key")
+    if idempotency_key:
+        if idempotency_key in _idempotency_keys:
+            return {"ok": True, "idempotent": True}
+        _idempotency_keys[idempotency_key] = True
+
+    objetivo = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
+    if not objetivo:
+        raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
+    if not objetivo["ativo"]:
+        raise HTTPException(status_code=403, detail="Este objetivo está bloqueado.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    prog = db.execute(
+        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+        (oid, user["key"])
+    ).fetchone()
+
+    if prog and prog["status"] == "concluido":
+        if objetivo["periodicidade"] == "diaria":
+            if prog["ultima_atualizacao"][:10] == datetime.datetime.utcnow().date().isoformat():
+                raise HTTPException(status_code=409, detail="Objetivo diário já concluído hoje.")
+        elif objetivo["periodicidade"] == "semanal":
+            ult_semana = datetime.datetime.fromisoformat(prog["ultima_atualizacao"]).date().isocalendar()[1]
+            if ult_semana == datetime.datetime.utcnow().date().isocalendar()[1]:
+                raise HTTPException(status_code=409, detail="Objetivo semanal já concluído esta semana.")
+        elif objetivo["periodicidade"] == "mensal":
+            ult_dt = datetime.datetime.fromisoformat(prog["ultima_atualizacao"]).date()
+            if ult_dt.year == datetime.datetime.utcnow().date().year and ult_dt.month == datetime.datetime.utcnow().date().month:
+                raise HTTPException(status_code=409, detail="Objetivo mensal já concluído este mês.")
+
+    if prog:
+        db.execute(
+            "UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
+            (objetivo["meta_valor"], now, prog["id"])
+        )
+    else:
+        pid = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (pid, oid, user["key"], objetivo["meta_valor"], "concluido", now, now, now)
+        )
+
+    _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"], f"Objetivo concluído: {objetivo['nome']}")
+    _update_streak(db, user["key"])
+    _log_objective_audit(db, oid, user["key"], "concluir",
+                         f"Objetivo concluído manualmente. Recompensa: {objetivo['recompensa_dcoins']} D-Cash")
+    db.commit()
+    ws_emit_to_user(user["key"], "objective_completed",
+                    {"id": oid, "user_key": user["key"], "status": "concluido", "progresso": objetivo["meta_valor"]})
+    return {"ok": True}
+
+@app.post("/api/objetivos/{oid}/incrementar")
+def incrementar_objetivo(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
+    _log_objective_audit._request = request
+    _check_objective_rate_limit(user["key"])
+
+    idempotency_key = (body or {}).get("idempotency_key")
+    if idempotency_key:
+        if idempotency_key in _idempotency_keys:
+            return {"ok": True, "idempotent": True}
+        _idempotency_keys[idempotency_key] = True
+
+    objetivo = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
+    if not objetivo:
+        raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
+    if not objetivo["ativo"]:
+        raise HTTPException(status_code=403, detail="Este objetivo está bloqueado.")
+
+    now = datetime.datetime.utcnow().isoformat()
+    prog = db.execute(
+        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+        (oid, user["key"])
+    ).fetchone()
+    increment = (body or {}).get("incremento", 1)
+
+    if prog:
+        if objetivo["tipo_progresso"] == "unico":
+            novo_progresso = objetivo["meta_valor"]
+            novo_status = "concluido"
+        else:
+            novo_progresso = (prog["progresso_atual"] or 0) + increment
+            novo_status = "concluido" if novo_progresso >= objetivo["meta_valor"] else "progresso"
+        db.execute(
+            "UPDATE objetivos_progress SET progresso_atual=%s, status=%s, ultima_atualizacao=%s WHERE id=%s",
+            (novo_progresso, novo_status, now, prog["id"])
+        )
+    else:
+        pid = str(uuid.uuid4())
+        novo_progresso = min(increment, objetivo["meta_valor"])
+        novo_status = "concluido" if novo_progresso >= objetivo["meta_valor"] else "progresso"
+        db.execute(
+            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (pid, oid, user["key"], novo_progresso, novo_status, now, now, now)
+        )
+
+    if novo_status == "concluido":
+        if objetivo["tipo_progresso"] != "sequencia":
+            _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"],
+                          f"Objetivo concluído: {objetivo['nome']}")
+            _update_streak(db, user["key"])
+        else:
+            _update_streak(db, user["key"])
+
+    _log_objective_audit(db, oid, user["key"], "incrementar",
+                         f"Incremento de {increment}: {novo_progresso}/{objetivo['meta_valor']} (status: {novo_status})")
+    db.commit()
+    ev = "objective_completed" if novo_status == "concluido" else "objective_updated"
+    ws_emit_to_user(user["key"], ev, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso})
+    return {"ok": True, "status": novo_status, "progresso": novo_progresso}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FEEDBACK SYSTEM
