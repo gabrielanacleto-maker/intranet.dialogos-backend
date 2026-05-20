@@ -242,6 +242,12 @@ def ws_emit(event: str, payload: dict, rooms=None):
     except Exception:
         logger.exception("socket_emit_failed event=%s", event)
 
+def ws_emit_to_user(user_key: str, event: str, payload: dict):
+    try:
+        sio.emit(event, payload, room=f"user:{user_key}")
+    except Exception:
+        logger.exception("socket_emit_to_user_failed event=%s user=%s", event, user_key)
+
 security = HTTPBearer(auto_error=False)
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -2590,16 +2596,16 @@ def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_us
                           f"Objetivo concluído: {objetivo['nome']}")
     db.commit()
     event_name = "objective_completed" if novo_status == "concluido" else "objective_updated"
-    ws_emit(event_name, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso})
+    ws_emit_to_user(user["key"], event_name, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso})
     return {"ok": True}
 
 @app.post("/api/objetivos/reset")
 def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
-    hoje = datetime.date.today().isoformat()
     hoje_dt = datetime.datetime.utcnow().isoformat()
     dia_semana = datetime.datetime.utcnow().weekday()
     dia_mes = datetime.datetime.utcnow().day
     resetados = 0
+    afetados = {}  # user_key -> list of objective_ids that were uncompleted
     objetivos = db.execute("SELECT * FROM objetivos_def WHERE ativo=1").fetchall()
     for obj in objetivos:
         deve_resetar = False
@@ -2610,6 +2616,16 @@ def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
         elif obj["periodicidade"] == "mensal" and dia_mes == 1:
             deve_resetar = True
         if deve_resetar:
+            prog_rows = db.execute(
+                "SELECT id, user_key, status FROM objetivos_progress WHERE objetivo_id=%s",
+                (obj["id"],)
+            ).fetchall()
+            for pr in prog_rows:
+                if pr["status"] == "concluido":
+                    uk = pr["user_key"]
+                    if uk not in afetados:
+                        afetados[uk] = []
+                    afetados[uk].append(obj["id"])
             db.execute(
                 """UPDATE objetivos_progress SET progresso_atual=0,
                    status=CASE WHEN status='concluido' THEN 'pendente' ELSE status END,
@@ -2619,6 +2635,9 @@ def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
             )
             resetados += db.execute("SELECT changes()").fetchone()[0]
     db.commit()
+    for uk, oids in afetados.items():
+        for oid in oids:
+            ws_emit_to_user(uk, "objective_uncompleted", {"id": oid, "user_key": uk})
     ws_emit("objective_updated", {"type": "reset", "resetados": resetados, "user_key": user["key"]})
     return {"ok": True, "resetados": resetados}
 
@@ -2820,6 +2839,16 @@ def get_metric_feedbacks(user=Depends(get_current_user), db=Depends(get_db)):
 def get_metric_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
     row = db.execute(
         "SELECT COUNT(*) as cnt FROM objetivos WHERE user_key=%s",
+        (user["key"],)
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+@app.get("/api/metricas/objetivos/concluidos")
+def get_metric_objetivos_concluidos(user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute(
+        """SELECT COUNT(*) as cnt FROM objetivos_progress op
+           JOIN objetivos_def od ON od.id = op.objetivo_id
+           WHERE op.user_key=%s AND op.status='concluido' AND od.ativo=1""",
         (user["key"],)
     ).fetchone()
     return {"count": row["cnt"] if row else 0}
