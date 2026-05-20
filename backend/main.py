@@ -2855,9 +2855,7 @@ def criar_nova_tarefa(
         destinatario_id = body.atribuir_para
         delegado_por = user["key"]
 
-    tipo = "tarefa"
-    if body.tipo_tarefa in ("reuniao", "treinamento", "palestra", "lembrete"):
-        tipo = body.tipo_tarefa
+    tipo = "gestor"
 
     prioridade = body.prioridade if body.prioridade in ("alta", "media", "baixa") else "media"
     recorrencia = body.recorrencia if body.recorrencia in ("diaria", "semanal", "mensal") else "nenhuma"
