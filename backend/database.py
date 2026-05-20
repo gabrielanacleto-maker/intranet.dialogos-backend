@@ -331,6 +331,28 @@ def init_db():
                 FOREIGN KEY (objetivo_id) REFERENCES objetivos_def(id)
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS objetivos_audit_log (
+                id TEXT PRIMARY KEY,
+                objetivo_id TEXT NOT NULL,
+                user_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT DEFAULT '',
+                ip_address TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (objetivo_id) REFERENCES objetivos_def(id)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS objetivos_streaks (
+                id TEXT PRIMARY KEY,
+                user_key TEXT NOT NULL UNIQUE,
+                current_streak INTEGER NOT NULL DEFAULT 0,
+                max_streak INTEGER NOT NULL DEFAULT 0,
+                last_date TEXT,
+                updated_at TEXT NOT NULL
+            )
+        """)
         conn.commit()
         print("✅ Banco de dados inicializado.")
 
