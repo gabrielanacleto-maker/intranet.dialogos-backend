@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import os, uuid, shutil, datetime, json, re, time
 from urllib.parse import urlparse
 from pathlib import Path
+import logging
 
 from pydantic import BaseModel
 
@@ -30,6 +31,9 @@ TRUSTED_EMBED_DOMAINS = {"instagram.com", "tiktok.com", "youtube.com", "youtu.be
 
 # Simple in-memory rate limiting
 _upload_limits = {}
+_birthday_limits = {}
+_activity_limits = {}
+logger = logging.getLogger("dialogos.security")
 
 def _check_upload_rate_limit(user_key: str):
     now = time.time()
@@ -39,6 +43,24 @@ def _check_upload_rate_limit(user_key: str):
     if count >= 10:
         raise HTTPException(status_code=429, detail="Limite de uploads excedido. Tente novamente em 1 minuto.")
     _upload_limits[key] = count + 1
+
+def _check_birthday_rate_limit(user_key: str):
+    now = time.time()
+    minute = int(now / 60)
+    key = f"{user_key}:{minute}"
+    count = _birthday_limits.get(key, 0)
+    if count >= 60:
+        raise HTTPException(status_code=429, detail="Limite de requisições excedido. Tente novamente em instantes.")
+    _birthday_limits[key] = count + 1
+
+def _check_activity_rate_limit(user_key: str):
+    now = time.time()
+    minute = int(now / 60)
+    key = f"{user_key}:{minute}"
+    count = _activity_limits.get(key, 0)
+    if count >= 120:
+        raise HTTPException(status_code=429, detail="Limite de requisições excedido. Tente novamente em instantes.")
+    _activity_limits[key] = count + 1
 
 def _sanitize_text(text: str) -> str:
     if not text:
@@ -1854,18 +1876,42 @@ def _log_atividade(db, tipo: str, autor_key: str, descricao: str, target_key: st
          descricao, datetime.datetime.utcnow().isoformat())
     )
 
+def _normalize_atividade_row(row: dict):
+    # Security: response allowlist + sanitization mitigates XSS/injection in UI.
+    # Only fields explicitly needed by the feed are exposed to the frontend.
+    return {
+        "id": row.get("id"),
+        "tipo": _sanitize_text((row.get("tipo") or ""))[:30],
+        "descricao": _sanitize_text((row.get("descricao") or ""))[:400],
+        "created_at": row.get("created_at"),
+        "autor_key": _sanitize_text((row.get("autor_key") or ""))[:80],
+        "autor_nome": _sanitize_text((row.get("autor_nome") or ""))[:80],
+        "autor_initials": _sanitize_text((row.get("autor_initials") or ""))[:8],
+        "autor_photo": row.get("autor_photo"),
+    }
+
 
 @app.get("/api/atividades")
 def listar_atividades(limit: int = 50, user=Depends(get_current_user), db=Depends(get_db)):
+    # Security: authentication is enforced by JWT dependency (get_current_user).
+    # Client-side role/user data is never trusted here.
+    _check_activity_rate_limit(user["key"])
+
+    # Security: clamp query parameter to prevent forced over-fetch / endpoint abuse.
+    requested_limit = int(limit) if isinstance(limit, int) else 50
+    safe_limit = max(1, min(requested_limit, 100))
+    if safe_limit != requested_limit:
+        logger.warning("activity_limit_clamped user=%s requested=%s safe=%s", user["key"], requested_limit, safe_limit)
+
     rows = db.execute(
-        """SELECT a.*, u.name AS autor_nome, u.initials AS autor_initials,
-                  u.color AS autor_color, u.photo_url AS autor_photo
+        """SELECT a.id, a.tipo, a.descricao, a.created_at, a.autor_key,
+                  u.name AS autor_nome, u.initials AS autor_initials, u.photo_url AS autor_photo
            FROM atividades_dialogos a
            LEFT JOIN users u ON u.key = a.autor_key
            ORDER BY a.created_at DESC LIMIT %s""",
-        (limit,)
+        (safe_limit,)
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [_normalize_atividade_row(dict(r)) for r in rows]
 
 
 class ParabensRequest(BaseModel):
@@ -3316,8 +3362,37 @@ def listar_eventos_tarefas(user=Depends(get_current_user), db=Depends(get_db)):
 
 _birthday_cache = {"data": None, "timestamp": 0}
 
+def _normalize_birthday_row(row: dict):
+    nome = _sanitize_text((row.get("nome") or ""))[:80]
+    tipo = _sanitize_text((row.get("tipo") or ""))[:40]
+    departamento = _sanitize_text((row.get("departamento") or ""))[:60]
+    foto_url = row.get("foto_url") or None
+
+    try:
+        dia = int(row.get("dia"))
+        mes = int(row.get("mes"))
+    except Exception:
+        return None
+
+    if dia < 1 or dia > 31 or mes < 1 or mes > 12:
+        return None
+
+    return {
+        "id": row.get("id"),
+        "nome": nome,
+        "tipo": tipo,
+        "dia": dia,
+        "mes": mes,
+        "departamento": departamento,
+        "foto_url": foto_url,
+    }
+
 @app.get("/api/birthdays/current-month")
 def get_current_month_birthdays(user=Depends(get_current_user), db=Depends(get_db)):
+    # Security: user identity and role come only from validated JWT on backend.
+    # We never trust role/user fields from frontend payload for this endpoint.
+    _check_birthday_rate_limit(user["key"])
+
     now = time.time()
     if _birthday_cache["data"] and (now - _birthday_cache["timestamp"]) < 3600:
         return _birthday_cache["data"]
@@ -3330,7 +3405,16 @@ def get_current_month_birthdays(user=Depends(get_current_user), db=Depends(get_d
           AND mes = %s
         ORDER BY dia ASC
     """, (current_month,)).fetchall()
-    result = [dict(r) for r in rows]
+
+    # Security: strict response shaping + sanitization to mitigate XSS and
+    # data leakage of unexpected columns. Only an allowlisted structure is returned.
+    result = []
+    for r in rows:
+        normalized = _normalize_birthday_row(dict(r))
+        if not normalized:
+            logger.warning("birthday_row_rejected user=%s raw_id=%s", user["key"], dict(r).get("id"))
+            continue
+        result.append(normalized)
 
     _birthday_cache["data"] = result
     _birthday_cache["timestamp"] = now
