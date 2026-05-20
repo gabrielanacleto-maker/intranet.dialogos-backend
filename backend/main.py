@@ -2354,7 +2354,7 @@ def criar_objetivo(body: dict = None, user=Depends(get_current_user), db=Depends
 def atualizar_objetivo(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db)):
     if not user.get("is_admin") and not user.get("is_admin_user"):
         raise HTTPException(status_code=403, detail="Apenas administradores podem editar objetivos.")
-    existing = db.execute("SELECT id FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
+    existing = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
     if not existing:
         raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
     b = body or {}
@@ -2371,6 +2371,12 @@ def atualizar_objetivo(oid: str, body: dict = None, user=Depends(get_current_use
     if updates:
         params.append(oid)
         db.execute(f"UPDATE objetivos_def SET {', '.join(updates)} WHERE id=%s", params)
+        # Se foi desbloqueado (0→1), resetar progresso para zero
+        if b.get("ativo") and not existing.get("ativo"):
+            db.execute(
+                "UPDATE objetivos_progress SET progresso_atual=0, status='pendente', ultima_atualizacao=%s WHERE objetivo_id=%s",
+                (datetime.datetime.utcnow().isoformat(), oid)
+            )
         db.commit()
     return {"ok": True}
 
@@ -2389,7 +2395,7 @@ def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_us
     if not objetivo:
         raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
     if not objetivo["ativo"]:
-        raise HTTPException(status_code=400, detail="Objetivo está bloqueado.")
+        raise HTTPException(status_code=403, detail="Este objetivo está bloqueado.")
     now = datetime.datetime.utcnow().isoformat()
     prog = db.execute(
         "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
