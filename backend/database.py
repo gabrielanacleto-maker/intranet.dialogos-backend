@@ -300,6 +300,37 @@ def init_db():
             )
         """)
 
+        # ── OBJETIVOS GAMIFICADOS ───────────────────────────────────────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS objetivos_def (
+                id TEXT PRIMARY KEY,
+                nome TEXT NOT NULL,
+                descricao TEXT DEFAULT '',
+                categoria TEXT NOT NULL DEFAULT 'tarefas',
+                recompensa_dcoins INTEGER NOT NULL DEFAULT 10,
+                meta_valor INTEGER NOT NULL DEFAULT 1,
+                meta_unidade TEXT NOT NULL DEFAULT 'tarefas',
+                periodicidade TEXT NOT NULL DEFAULT 'diaria',
+                tipo_progresso TEXT NOT NULL DEFAULT 'incremental',
+                icone TEXT NOT NULL DEFAULT 'ti-star',
+                ativo INTEGER NOT NULL DEFAULT 1,
+                owner_key TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS objetivos_progress (
+                id TEXT PRIMARY KEY,
+                objetivo_id TEXT NOT NULL,
+                user_key TEXT NOT NULL,
+                progresso_atual INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pendente',
+                ultimo_reset TEXT,
+                ultima_atualizacao TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (objetivo_id) REFERENCES objetivos_def(id)
+            )
+        """)
         conn.commit()
         print("✅ Banco de dados inicializado.")
 

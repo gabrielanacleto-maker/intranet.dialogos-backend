@@ -2307,6 +2307,167 @@ def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db
         "recent_points": [dict(h) for h in history]
     }
 
+# ── OBJETIVOS GAMIFICADOS (CRUD + PROGRESSO) ──────────────────────────────
+
+@app.get("/api/objetivos")
+def listar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("SELECT * FROM objetivos_def ORDER BY created_at DESC").fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        prog = db.execute(
+            "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+            (d["id"], user["key"])
+        ).fetchone()
+        d["user_progress"] = dict(prog) if prog else None
+        result.append(d)
+    return result
+
+@app.post("/api/objetivos")
+def criar_objetivo(body: dict = None, user=Depends(get_current_user), db=Depends(get_db)):
+    if not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Apenas administradores podem criar objetivos.")
+    oid = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    nome = (body or {}).get("nome", "").strip()
+    if not nome:
+        raise HTTPException(status_code=422, detail="Nome é obrigatório.")
+    db.execute(
+        """INSERT INTO objetivos_def (id, nome, descricao, categoria, recompensa_dcoins,
+           meta_valor, meta_unidade, periodicidade, tipo_progresso, icone, ativo, owner_key, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (oid, nome, (body or {}).get("descricao", ""),
+         (body or {}).get("categoria", "tarefas"),
+         (body or {}).get("recompensa_dcoins", 10),
+         (body or {}).get("meta_valor", 1),
+         (body or {}).get("meta_unidade", "tarefas"),
+         (body or {}).get("periodicidade", "diaria"),
+         (body or {}).get("tipo_progresso", "incremental"),
+         (body or {}).get("icone", "ti-star"),
+         1 if (body or {}).get("ativo", True) else 0,
+         user["key"], now)
+    )
+    db.commit()
+    return {"ok": True, "id": oid}
+
+@app.put("/api/objetivos/{oid}")
+def atualizar_objetivo(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db)):
+    if not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Apenas administradores podem editar objetivos.")
+    existing = db.execute("SELECT id FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
+    b = body or {}
+    updates = []
+    params = []
+    for col in ("nome", "descricao", "categoria", "recompensa_dcoins", "meta_valor",
+                "meta_unidade", "periodicidade", "tipo_progresso", "icone"):
+        if col in b:
+            updates.append(f"{col}=%s")
+            params.append(b[col])
+    if "ativo" in b:
+        updates.append("ativo=%s")
+        params.append(1 if b["ativo"] else 0)
+    if updates:
+        params.append(oid)
+        db.execute(f"UPDATE objetivos_def SET {', '.join(updates)} WHERE id=%s", params)
+        db.commit()
+    return {"ok": True}
+
+@app.delete("/api/objetivos/{oid}")
+def deletar_objetivo(oid: str, user=Depends(get_current_user), db=Depends(get_db)):
+    if not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Apenas administradores podem remover objetivos.")
+    db.execute("DELETE FROM objetivos_progress WHERE objetivo_id=%s", (oid,))
+    db.execute("DELETE FROM objetivos_def WHERE id=%s", (oid,))
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/objetivos/{oid}/progresso")
+def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db)):
+    objetivo = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
+    if not objetivo:
+        raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
+    if not objetivo["ativo"]:
+        raise HTTPException(status_code=400, detail="Objetivo está bloqueado.")
+    now = datetime.datetime.utcnow().isoformat()
+    prog = db.execute(
+        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+        (oid, user["key"])
+    ).fetchone()
+    increment = (body or {}).get("incremento", 1)
+    if prog:
+        novo_progresso = (prog["progresso_atual"] or 0) + increment
+        novo_status = "concluido" if novo_progresso >= objetivo["meta_valor"] else "progresso"
+        if objetivo["tipo_progresso"] == "unico":
+            novo_progresso = objetivo["meta_valor"]
+            novo_status = "concluido"
+        db.execute(
+            "UPDATE objetivos_progress SET progresso_atual=%s, status=%s, ultima_atualizacao=%s WHERE id=%s",
+            (novo_progresso, novo_status, now, prog["id"])
+        )
+    else:
+        pid = str(uuid.uuid4())
+        novo_progresso = min(increment, objetivo["meta_valor"])
+        novo_status = "concluido" if novo_progresso >= objetivo["meta_valor"] else "progresso"
+        db.execute(
+            """INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (pid, oid, user["key"], novo_progresso, novo_status, now, now, now)
+        )
+        # Dar D-Cash se concluiu
+        if novo_status == "concluido":
+            _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"],
+                          f"Objetivo concluído: {objetivo['nome']}")
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/objetivos/reset")
+def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
+    hoje = datetime.date.today().isoformat()
+    hoje_dt = datetime.datetime.utcnow().isoformat()
+    dia_semana = datetime.datetime.utcnow().weekday()
+    dia_mes = datetime.datetime.utcnow().day
+    resetados = 0
+    objetivos = db.execute("SELECT * FROM objetivos_def WHERE ativo=1").fetchall()
+    for obj in objetivos:
+        deve_resetar = False
+        if obj["periodicidade"] == "diaria":
+            deve_resetar = True
+        elif obj["periodicidade"] == "semanal" and dia_semana == 0:
+            deve_resetar = True
+        elif obj["periodicidade"] == "mensal" and dia_mes == 1:
+            deve_resetar = True
+        if deve_resetar:
+            db.execute(
+                """UPDATE objetivos_progress SET progresso_atual=0,
+                   status=CASE WHEN status='concluido' THEN 'pendente' ELSE status END,
+                   ultimo_reset=%s
+                   WHERE objetivo_id=%s""",
+                (hoje_dt, obj["id"])
+            )
+            resetados += db.execute("SELECT changes()").fetchone()[0]
+    db.commit()
+    return {"ok": True, "resetados": resetados}
+
+def _award_dcoins(db, user_key, coins, reason):
+    pid = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    target = db.execute("SELECT key, points FROM users WHERE key=%s", (user_key,)).fetchone()
+    if not target:
+        return
+    db.execute(
+        "INSERT INTO user_points (id, user_key, points, reason, action_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+        (pid, user_key, coins, reason, "objetivo", now)
+    )
+    new_total = (target["points"] or 0) + coins
+    db.execute("UPDATE users SET points=%s WHERE key=%s", (new_total, user_key))
+    _notify(db, title="🎯 D-Cash recebido",
+            message=f"Você ganhou {coins} D-Cash por: {reason}",
+            ntype="xp", target_user_key=user_key,
+            sender_key="system", sender_name="Sistema",
+            reference_id=pid, play_sound=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FEEDBACK SYSTEM
 # ─────────────────────────────────────────────────────────────────────────────
