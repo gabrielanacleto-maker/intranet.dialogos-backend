@@ -161,6 +161,7 @@ else:
         "http://localhost:3000",
         "https://intranet-dialogos.vercel.app",
         "https://intranet-dialogos-backend.onrender.com",
+        "axis-dialogos.vercel.app"
     ]
 
 app.add_middleware(
