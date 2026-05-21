@@ -2777,26 +2777,40 @@ def objetivos_streak(user=Depends(get_current_user), db=Depends(get_db)):
 @app.get("/api/objetivos/leaderboard")
 def objetivos_leaderboard(user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute("""
-        SELECT u.key, u.name, u.initials, u.color, u.photo_url,
-               COALESCE(u.points, 0) as d_cash_total,
-               COALESCE((
-                   SELECT COUNT(*) FROM objetivos_progress op
-                   JOIN objetivos_def od ON od.id = op.objetivo_id
-                   WHERE op.user_key = u.key AND op.status = 'concluido' AND od.ativo = 1
-               ), 0) as objetivos_concluidos
+        SELECT
+            u.key, u.name, u.dept, u.color, u.photo_url,
+            COALESCE(u.points, 0) AS d_cash_total,
+            ROW_NUMBER() OVER (ORDER BY u.points DESC) AS position
         FROM users u
         ORDER BY u.points DESC
         LIMIT 10
     """).fetchall()
     top10 = []
-    for i, r in enumerate(rows, 1):
+    for r in rows:
         d = dict(r)
-        d["position"] = i
-        top10.append(d)
-    my_pos = next((i+1 for i, u in enumerate(
-        db.execute("SELECT key FROM users ORDER BY points DESC").fetchall()
-    ) if u["key"] == user["key"]), None)
-    return {"top10": top10, "myPosition": my_pos}
+        name = d.get("name") or ""
+        parts = name.strip().split()
+        initials = "".join(p[0] for p in parts if p and p[0].isalpha())[:2].upper() or "??"
+        top10.append({
+            "key": d["key"],
+            "name": name,
+            "department": d.get("dept") or "",
+            "initials": initials,
+            "color": d.get("color") or "#2a2a2a",
+            "avatar_url": d.get("photo_url") or None,
+            "d_cash_total": d["d_cash_total"],
+            "position": d["position"],
+        })
+    my_position = db.execute("""
+        SELECT position FROM (
+            SELECT key, ROW_NUMBER() OVER (ORDER BY points DESC) AS position
+            FROM users
+        ) sub WHERE key=%s
+    """, (user["key"],)).fetchone()
+    return {
+        "top10": top10,
+        "myPosition": my_position["position"] if my_position else None,
+    }
 
 @app.get("/api/objetivos/{oid}/audit")
 def objetivo_audit_log(oid: str, user=Depends(get_current_user), db=Depends(get_db)):
