@@ -177,7 +177,6 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Socket.IO server (real-time updates without polling)
 sio = socketio.Server(
-    async_mode="asgi",
     cors_allowed_origins=origins,
     logger=False,
     engineio_logger=False,
