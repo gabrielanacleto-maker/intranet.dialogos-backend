@@ -427,11 +427,6 @@ def login(body: LoginRequest, db=Depends(get_db)):
         if not user or not check_password(body.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
         token = create_token({"sub": user["key"], "level": user["access_level"]})
-        _notify(db, title="🔐 Login realizado",
-                message=f"{user['name']} fez login no sistema",
-                ntype="system", audience="all",
-                sender_key=user["key"], sender_name=user["name"],
-                play_sound=False)
         auto_concluiu = _auto_concluir_login(db, user)
         return {
             "token": token,
@@ -2554,6 +2549,12 @@ def criar_parabens(body: ParabensRequest, user=Depends(get_current_user), db=Dep
         descricao += f" — {mensagem}"
 
     _log_atividade(db, "parabens", user["key"], descricao, target_key or "@todos", target_nome or "@todos")
+    if target_key == "@todos":
+        _notify(db, title="🎉 Celebração",
+                message=f"{user['name']} celebrou @todos — {mensagem[:80]}" if mensagem else f"{user['name']} celebrou @todos",
+                ntype="celebration", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                play_sound=False)
     db.commit()
     return {"ok": True}
 
@@ -3301,7 +3302,7 @@ def _award_dcoins(db, user_key, coins, reason, notify=True):
     if notify:
         _notify(db, title="D-Cash recebido",
                 message=f"Você ganhou {coins} D-Cash por: {reason}",
-                ntype="xp", target_user_key=user_key,
+                ntype="dcash", target_user_key=user_key,
                 sender_key="system", sender_name="Sistema",
                 reference_id=pid, play_sound=True)
 
@@ -4579,6 +4580,9 @@ def get_notifications_v2(
     _ensure_notifications_table(db)
     conditions = ["(n.target_user_key = %s OR n.audience = 'all' OR n.audience = %s)"]
     params = [user["key"], user.get("dept", "")]
+
+    conditions.append("n.type IN %s")
+    params.append(('comunicado', 'dcash', 'celebration'))
 
     if type:
         conditions.append("n.type = %s")
