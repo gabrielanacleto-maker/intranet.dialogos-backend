@@ -367,6 +367,7 @@ def login(body: LoginRequest, db=Depends(get_db)):
                 ntype="system", audience="all",
                 sender_key=user["key"], sender_name=user["name"],
                 play_sound=False)
+        _auto_concluir_login(db, user)
         return {
             "token": token,
             "must_change_password": not user["password_changed"],
@@ -2604,6 +2605,72 @@ def _update_streak(db, user_key):
             (sid, user_key, 1, 1, hoje, now)
         )
         return 1
+
+# ── Auto-concluir "Faça Login" no login ─────────────────────────────────────
+def _update_login_streak(db, user_key):
+    hoje = datetime.datetime.utcnow().date()
+    hoje_str = hoje.isoformat()
+    agora = datetime.datetime.utcnow().isoformat()
+    streak = db.execute("SELECT * FROM objetivos_streaks WHERE user_key=%s", (user_key,)).fetchone()
+    if streak:
+        if streak["last_date"] == hoje_str:
+            return streak["current_streak"]
+        last = datetime.date.fromisoformat(streak["last_date"])
+        delta = (hoje - last).days
+        only_weekends = True
+        for i in range(1, delta):
+            d = last + datetime.timedelta(days=i)
+            if d.weekday() < 5:
+                only_weekends = False
+                break
+        if delta == 1 or (delta > 1 and only_weekends):
+            novo = streak["current_streak"] + 1
+        else:
+            novo = 1
+        novo_max = max(novo, streak["max_streak"])
+        db.execute(
+            "UPDATE objetivos_streaks SET current_streak=%s, max_streak=%s, last_date=%s, updated_at=%s WHERE user_key=%s",
+            (novo, novo_max, hoje_str, agora, user_key)
+        )
+        return novo
+    sid = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO objetivos_streaks (id, user_key, current_streak, max_streak, last_date, updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
+        (sid, user_key, 1, 1, hoje_str, agora)
+    )
+    return 1
+
+def _auto_concluir_login(db, user):
+    hoje = datetime.datetime.utcnow().date()
+    dia_semana = hoje.weekday()
+    if dia_semana >= 5:
+        return
+    obj = db.execute("SELECT * FROM objetivos_def WHERE LOWER(nome)=%s AND ativo=1", ("faça login",)).fetchone()
+    if not obj:
+        return
+    hoje_str = hoje.isoformat()
+    agora = datetime.datetime.utcnow().isoformat()
+    prog = db.execute(
+        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+        (obj["id"], user["key"])
+    ).fetchone()
+    if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje_str:
+        return
+    if prog:
+        db.execute(
+            "UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
+            (obj["meta_valor"], agora, prog["id"])
+        )
+    else:
+        pid = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (pid, obj["id"], user["key"], obj["meta_valor"], "concluido", agora, agora, agora)
+        )
+    _award_dcoins(db, user["key"], obj["recompensa_dcoins"], f"Login diário: {obj['nome']}")
+    _update_login_streak(db, user["key"])
+    db.commit()
+    ws_emit_to_user(user["key"], "objective_completed", {"id": obj["id"], "user_key": user["key"], "status": "concluido", "progresso": obj["meta_valor"]})
 
 @app.post("/api/objetivos/{oid}/progresso")
 def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
