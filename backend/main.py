@@ -4647,6 +4647,15 @@ def mark_all_read_patch(user=Depends(get_current_user), db=Depends(get_db)):
     updated = cur.rowcount if hasattr(cur, 'rowcount') else 0
     return {"success": True, "updated": updated}
 
+@app.delete("/api/notifications")
+def reset_notifications(user=Depends(get_current_user), db=Depends(get_db)):
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Apenas admin pode resetar notificações.")
+    _ensure_notifications_table(db)
+    db.execute("DELETE FROM notifications")
+    db.commit()
+    return {"success": True}
+
 
     # ============================================================
 # COLE ESSAS ROTAS NO FINAL DO SEU main.py
