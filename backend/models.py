@@ -203,3 +203,18 @@ class ComentarTarefaRequest(BaseModel):
 
 class JustificarAtrasoRequest(BaseModel):
     delay_reason: str
+
+# ── Comunicados ────────────────────────────────────────────────────────────────
+class CriarComunicadoRequest(BaseModel):
+    title: str
+    content: str
+    target_audience: str = 'all'
+    priority: str = 'normal'
+    is_draft: bool = True
+
+class AtualizarComunicadoRequest(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    target_audience: Optional[str] = None
+    priority: Optional[str] = None
+    is_draft: Optional[bool] = None

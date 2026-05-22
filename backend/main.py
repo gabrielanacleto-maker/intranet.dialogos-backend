@@ -65,6 +65,71 @@ def _check_activity_rate_limit(user_key: str):
         raise HTTPException(status_code=429, detail="Limite de requisições excedido. Tente novamente em instantes.")
     _activity_limits[key] = count + 1
 
+def _sanitize_html(html: str) -> str:
+    """Whitelist-based HTML sanitizer for rich text content (Comunicados)."""
+    if not html:
+        return ""
+    ALLOWED_TAGS = {
+        'p', 'br', 'b', 'i', 'u', 'em', 'strong', 'small', 'sub', 'sup',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'hr',
+        'a', 'img',
+        'div', 'span',
+        'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption',
+    }
+    ALLOWED_ATTRS = {
+        'a': ['href', 'title', 'target', 'rel'],
+        'img': ['src', 'alt', 'title', 'width', 'height', 'style'],
+        '*': ['class', 'style', 'id'],
+    }
+    ALLOWED_PROTOCOLS = {'http', 'https', 'mailto'}
+    # Remove dangerous patterns first
+    dangerous = [
+        r'<script[\s\S]*?>[\s\S]*?</script>', r'<iframe[\s\S]*?>', r'<object[\s\S]*?>',
+        r'<embed[\s\S]*?>', r'<svg[\s\S]*?>', r'<style[\s\S]*?>',
+        r'javascript:', r'data:', r'vbscript:',
+        r'onerror\s*=', r'onclick\s*=', r'onload\s*=', r'onmouseover\s*=',
+        r'onsubmit\s*=', r'onfocus\s*=', r'onchange\s*=', r'oninput\s*=',
+        r'eval\s*\(', r'Function\s*\(', r'document\.cookie',
+        r'window\.location', r'innerHTML', r'outerHTML',
+        r'fetch\s*\(', r'XMLHttpRequest', r'new\s+Function',
+        r'alert\s*\(', r'prompt\s*\(', r'confirm\s*\(',
+    ]
+    for pattern in dangerous:
+        html = re.sub(pattern, '', html, flags=re.IGNORECASE)
+    # Strip tags not in whitelist
+    def _strip_disallowed(m):
+        tag = m.group(0)
+        tagname = re.match(r'</?(\w+)', tag).group(1).lower()
+        if tagname in ALLOWED_TAGS:
+            return tag
+        return ''
+    html = re.sub(r'<[^>]*>', _strip_disallowed, html)
+    # Strip dangerous attributes
+    def _clean_attrs(m):
+        tag = m.group(0)
+        tagname = re.match(r'</?(\w+)', tag).group(1).lower() if not tag.startswith('</') else ''
+        if tag.startswith('</'):
+            return tag
+        allowed_attrs = ALLOWED_ATTRS.get(tagname, []) + ALLOWED_ATTRS.get('*', [])
+        new_tag = re.match(r'<\w+', tag).group(0)
+        for attr, value in re.findall(r'(\w+)\s*=\s*"([^"]*)"', tag):
+            if attr in allowed_attrs:
+                if attr in ('href', 'src'):
+                    protocol = value.split(':')[0].lower() if ':' in value else 'http'
+                    if protocol in ALLOWED_PROTOCOLS:
+                        new_tag += f' {attr}="{value}"'
+                elif attr == 'style':
+                    safe_style = re.sub(r'(?i)(position|absolute|fixed|z-index|top|left|display).*?(;|$)', '', value)
+                    if safe_style.strip():
+                        new_tag += f' style="{safe_style.strip()}"'
+                else:
+                    new_tag += f' {attr}="{value}"'
+        new_tag += '>'
+        return new_tag
+    html = re.sub(r'<[^>]+>', _clean_attrs, html)
+    return html.strip()[:150000]  # 150KB max
+
 def _sanitize_text(text: str) -> str:
     if not text:
         return ""
@@ -909,6 +974,424 @@ def get_unviewed_counts(feed: str = "feed", user=Depends(get_current_user), db=D
         "unviewed_count": unviewed_count,
         "unviewed_ids": unviewed_ids[:50],
     }
+
+# ═════════════════════════════════════════════════════════════════════════════
+# COMUNICADOS MODULE (institutional communications)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_COMUNICADO_RATE_LIMITS = {}  # user_key -> list of publish timestamps for rate limiting
+
+def _ensure_comunicados_table(db):
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS communications (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            author_key TEXT NOT NULL,
+            author_name TEXT NOT NULL,
+            is_draft INTEGER NOT NULL DEFAULT 1,
+            is_published INTEGER NOT NULL DEFAULT 0,
+            published_at TEXT,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            deleted_at TEXT,
+            deleted_by_key TEXT,
+            target_audience TEXT NOT NULL DEFAULT 'all',
+            priority TEXT NOT NULL DEFAULT 'normal',
+            views_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS communication_reads (
+            id TEXT PRIMARY KEY,
+            communication_id TEXT NOT NULL,
+            user_key TEXT NOT NULL,
+            read_at TEXT NOT NULL,
+            read_count INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(communication_id, user_key)
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS communication_notifications (
+            id TEXT PRIMARY KEY,
+            communication_id TEXT NOT NULL,
+            notified_at TEXT NOT NULL,
+            total_recipients INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_author ON communications(author_key)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_published ON communications(is_published)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_deleted ON communications(is_deleted)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_audience ON communications(target_audience)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_created ON communications(created_at DESC)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_comm ON communication_reads(communication_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user ON communication_reads(user_key)")
+
+
+def _can_publish_comunicado(user) -> bool:
+    role = (user.get("role") or "").lower()
+    return bool(
+        user.get("is_admin") or user.get("is_admin_user") or
+        user.get("is_rh") or user.get("is_diretor") or user.get("is_leader") or
+        role in ("diretora", "diretor", "líder", "lider", "admin", "rh")
+    )
+
+
+def _check_comunicado_rate_limit(user_key: str):
+    now = time.time()
+    if user_key not in _COMUNICADO_RATE_LIMITS:
+        _COMUNICADO_RATE_LIMITS[user_key] = []
+    timestamps = _COMUNICADO_RATE_LIMITS[user_key]
+    # Keep only last hour
+    cutoff = now - 3600
+    timestamps[:] = [t for t in timestamps if t > cutoff]
+    if len(timestamps) >= 10:
+        raise HTTPException(status_code=429, detail="Limite de 10 publicações por hora excedido.")
+    timestamps.append(now)
+
+
+def _comunicado_to_dict(row) -> dict:
+    return {
+        "id": row.get("id"),
+        "title": _sanitize_text(row.get("title") or ""),
+        "content": row.get("content") or "",
+        "author_key": row.get("author_key"),
+        "author_name": row.get("author_name"),
+        "is_draft": bool(row.get("is_draft")),
+        "is_published": bool(row.get("is_published")),
+        "published_at": row.get("published_at"),
+        "is_deleted": bool(row.get("is_deleted")),
+        "deleted_at": row.get("deleted_at"),
+        "deleted_by_key": row.get("deleted_by_key"),
+        "target_audience": row.get("target_audience") or "all",
+        "priority": row.get("priority") or "normal",
+        "views_count": row.get("views_count") or 0,
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+# ── CREATE comunicado ─────────────────────────────────────────────────────────
+@app.post("/api/comunicados")
+def criar_comunicado(body: CriarComunicadoRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    if not _can_publish_comunicado(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para criar comunicados.")
+    if not body.title or not body.title.strip():
+        raise HTTPException(status_code=400, detail="Título é obrigatório.")
+    if not body.content or not body.content.strip():
+        raise HTTPException(status_code=400, detail="Conteúdo é obrigatório.")
+    if body.priority not in ("normal", "urgent"):
+        raise HTTPException(status_code=400, detail="Prioridade inválida. Use 'normal' ou 'urgent'.")
+    if body.target_audience not in ("all", "rh", "leader", "admin", "diretor", "platina", "dourado", "diamante"):
+        raise HTTPException(status_code=400, detail="Audiência inválida.")
+    if len(body.content) > 150000:
+        raise HTTPException(status_code=400, detail="Conteúdo excede o limite de 150KB.")
+    now = datetime.datetime.utcnow().isoformat()
+    safe_title = _sanitize_text(body.title.strip())[:200]
+    safe_content = _sanitize_html(body.content)
+    if not safe_content.strip():
+        safe_content = body.content[:150000]
+    comm_id = str(uuid.uuid4())
+    db.execute("""
+        INSERT INTO communications
+        (id, title, content, author_key, author_name,
+         is_draft, is_published, published_at,
+         is_deleted, target_audience, priority, views_count,
+         created_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        comm_id, safe_title, safe_content,
+        user["key"], user["name"],
+        1 if body.is_draft else 0,
+        0 if body.is_draft else 1,
+        None if body.is_draft else now,
+        0, body.target_audience, body.priority, 0,
+        now, now,
+    ))
+    _log_atividade(db, "comunicado", user["key"],
+                   f"{'Rascunho' if body.is_draft else 'Publicou'} comunicado: {safe_title[:100]}")
+    db.commit()
+    return {"ok": True, "id": comm_id}
+
+
+# ── LIST comunicados ──────────────────────────────────────────────────────────
+@app.get("/api/comunicados")
+def listar_comunicados(
+    user=Depends(get_current_user),
+    db=Depends(get_db),
+    filtro: str = "ativos",
+    page: int = 1,
+    per_page: int = 20,
+):
+    _ensure_comunicados_table(db)
+    is_admin = user.get("is_admin") or False
+    where_clauses = []
+    params = []
+    if filtro == "rascunhos":
+        if not is_admin and not _can_publish_comunicado(user):
+            raise HTTPException(status_code=403, detail="Sem permissão.")
+        where_clauses.append("c.author_key = %s AND c.is_draft = 1 AND c.is_deleted = 0")
+        params.append(user["key"])
+    elif filtro == "lixeira":
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Sem permissão.")
+        where_clauses.append("c.is_deleted = 1")
+    else:
+        where_clauses.append("c.is_deleted = 0 AND c.is_published = 1")
+        if not is_admin:
+            where_clauses.append("(c.target_audience = 'all' OR c.author_key = %s)")
+            params.append(user["key"])
+    offset = (page - 1) * per_page
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    rows = db.execute(
+        f"SELECT c.* FROM communications c WHERE {where_sql} ORDER BY c.created_at DESC LIMIT %s OFFSET %s",
+        (*params, per_page, offset)
+    ).fetchall()
+    total_row = db.execute(
+        f"SELECT COUNT(*) as cnt FROM communications c WHERE {where_sql}", params
+    ).fetchone()
+    total = total_row["cnt"] if total_row else 0
+    # Check read status for each
+    read_ids = set()
+    read_rows = db.execute(
+        "SELECT cr.communication_id FROM communication_reads cr WHERE cr.user_key = %s",
+        (user["key"],)
+    ).fetchall()
+    for r in read_rows:
+        read_ids.add(r["communication_id"])
+    result = []
+    for row in rows:
+        d = _comunicado_to_dict(row)
+        d["is_read"] = row["id"] in read_ids
+        result.append(d)
+    return {"comunicados": result, "total": total, "page": page, "per_page": per_page}
+
+
+# ── GET single comunicado ────────────────────────────────────────────────────
+@app.get("/api/comunicados/{comm_id}")
+def get_comunicado(comm_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    row = db.execute("SELECT * FROM communications WHERE id=%s", (comm_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Comunicado não encontrado.")
+    if row["is_deleted"]:
+        if not user.get("is_admin"):
+            raise HTTPException(status_code=404, detail="Comunicado não encontrado.")
+    if not row["is_published"] and row["author_key"] != user["key"] and not user.get("is_admin"):
+        raise HTTPException(status_code=404, detail="Comunicado não encontrado.")
+    d = _comunicado_to_dict(row)
+    # Increment views count
+    db.execute("UPDATE communications SET views_count = views_count + 1 WHERE id=%s", (comm_id,))
+    d["views_count"] = (d.get("views_count") or 0) + 1
+    db.commit()
+    return d
+
+
+# ── UPDATE comunicado ─────────────────────────────────────────────────────────
+@app.put("/api/comunicados/{comm_id}")
+def atualizar_comunicado(comm_id: str, body: AtualizarComunicadoRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    row = db.execute("SELECT * FROM communications WHERE id=%s", (comm_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Comunicado não encontrado.")
+    if row["author_key"] != user["key"] and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão para editar este comunicado.")
+    if row["is_published"]:
+        raise HTTPException(status_code=400, detail="Comunicado já publicado. Não pode ser editado.")
+    now = datetime.datetime.utcnow().isoformat()
+    updates = []
+    params = []
+    if body.title is not None:
+        safe_title = _sanitize_text(body.title.strip())[:200]
+        if not safe_title:
+            raise HTTPException(status_code=400, detail="Título não pode ser vazio.")
+        updates.append("title = %s")
+        params.append(safe_title)
+    if body.content is not None:
+        if len(body.content) > 150000:
+            raise HTTPException(status_code=400, detail="Conteúdo excede o limite de 150KB.")
+        safe_content = _sanitize_html(body.content)
+        updates.append("content = %s")
+        params.append(safe_content if safe_content.strip() else body.content[:150000])
+    if body.target_audience is not None:
+        if body.target_audience not in ("all", "rh", "leader", "admin", "diretor", "platina", "dourado", "diamante"):
+            raise HTTPException(status_code=400, detail="Audiência inválida.")
+        updates.append("target_audience = %s")
+        params.append(body.target_audience)
+    if body.priority is not None:
+        if body.priority not in ("normal", "urgent"):
+            raise HTTPException(status_code=400, detail="Prioridade inválida.")
+        updates.append("priority = %s")
+        params.append(body.priority)
+    if body.is_draft is not None:
+        updates.append("is_draft = %s")
+        params.append(1 if body.is_draft else 0)
+    if not updates:
+        return {"ok": True}
+    updates.append("updated_at = %s")
+    params.append(now)
+    params.append(comm_id)
+    db.execute(f"UPDATE communications SET {', '.join(updates)} WHERE id=%s", params)
+    db.commit()
+    return {"ok": True}
+
+
+# ── PUBLISH comunicado ────────────────────────────────────────────────────────
+@app.post("/api/comunicados/{comm_id}/publish")
+def publicar_comunicado(comm_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    row = db.execute("SELECT * FROM communications WHERE id=%s", (comm_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Comunicado não encontrado.")
+    if row["is_published"]:
+        raise HTTPException(status_code=400, detail="Comunicado já publicado.")
+    if row["is_deleted"]:
+        raise HTTPException(status_code=400, detail="Comunicado está na lixeira.")
+    if row["author_key"] != user["key"] and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão para publicar este comunicado.")
+    _check_comunicado_rate_limit(user["key"])
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute("""
+        UPDATE communications
+        SET is_draft = 0, is_published = 1, published_at = %s, updated_at = %s
+        WHERE id = %s
+    """, (now, now, comm_id))
+    # Re-read to get the updated row with author info
+    row = db.execute("SELECT * FROM communications WHERE id=%s", (comm_id,)).fetchone()
+    safe_title = _sanitize_text(row["title"])
+    # Send notification to all users
+    notif_title = "📢 Novo comunicado"
+    notif_msg = f"{user['name']} publicou: {safe_title[:100]}"
+    _notify(db, title=notif_title, message=notif_msg,
+            ntype="comunicado",
+            audience=row["target_audience"] if row["target_audience"] not in ("all", "") else "all",
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=comm_id, play_sound=False)
+    # Track notification sent
+    notif_id = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO communication_notifications (id, communication_id, notified_at, total_recipients) VALUES (%s,%s,%s,%s)",
+        (notif_id, comm_id, now, 0)
+    )
+    _log_atividade(db, "comunicado", user["key"], f"Publicou comunicado: {safe_title[:100]}")
+    # Emit WebSocket for real-time
+    ws_emit("comunicado_published", _comunicado_to_dict(row), rooms=["all"])
+    db.commit()
+    return {"ok": True, "id": comm_id}
+
+
+# ── SOFT DELETE comunicado ────────────────────────────────────────────────────
+@app.delete("/api/comunicados/{comm_id}")
+def deletar_comunicado(comm_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    row = db.execute("SELECT * FROM communications WHERE id=%s", (comm_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Comunicado não encontrado.")
+    if row["author_key"] != user["key"] and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão para excluir este comunicado.")
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE communications SET is_deleted = 1, deleted_at = %s, deleted_by_key = %s, updated_at = %s WHERE id=%s",
+        (now, user["key"], now, comm_id)
+    )
+    safe_title = _sanitize_text(row["title"])
+    _log_atividade(db, "comunicado", user["key"], f"Excluiu comunicado: {safe_title[:100]}")
+    db.commit()
+    return {"ok": True}
+
+
+# ── MARK AS READ ──────────────────────────────────────────────────────────────
+@app.post("/api/comunicados/{comm_id}/read")
+def marcar_comunicado_lido(comm_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    row = db.execute("SELECT * FROM communications WHERE id=%s", (comm_id,)).fetchone()
+    if not row or row["is_deleted"]:
+        raise HTTPException(status_code=404, detail="Comunicado não encontrado.")
+    now = datetime.datetime.utcnow().isoformat()
+    existing = db.execute(
+        "SELECT * FROM communication_reads WHERE communication_id=%s AND user_key=%s",
+        (comm_id, user["key"])
+    ).fetchone()
+    if existing:
+        db.execute(
+            "UPDATE communication_reads SET read_count = read_count + 1, read_at = %s WHERE id=%s",
+            (now, existing["id"])
+        )
+    else:
+        read_id = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO communication_reads (id, communication_id, user_key, read_at, read_count) VALUES (%s,%s,%s,%s,1)",
+            (read_id, comm_id, user["key"], now)
+        )
+    db.commit()
+    return {"ok": True}
+
+
+# ── LIST READERS (audit) ──────────────────────────────────────────────────────
+@app.get("/api/comunicados/{comm_id}/readers")
+def listar_leitura_comunicado(comm_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    is_admin = user.get("is_admin") or False
+    is_rh = user.get("is_rh") or False
+    is_diretor = user.get("is_diretor") or False
+    if not (is_admin or is_rh or is_diretor):
+        raise HTTPException(status_code=403, detail="Sem permissão para ver relatório de leitura.")
+    row = db.execute("SELECT * FROM communications WHERE id=%s", (comm_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Comunicado não encontrado.")
+    readers = db.execute(
+        """SELECT cr.user_key, u.name, u.initials, u.color, u.photo_url,
+                  cr.read_at, cr.read_count
+           FROM communication_reads cr
+           JOIN users u ON u.key = cr.user_key
+           WHERE cr.communication_id = %s
+           ORDER BY cr.read_at DESC""",
+        (comm_id,)
+    ).fetchall()
+    total_users = db.execute("SELECT COUNT(*) as cnt FROM users").fetchone()["cnt"]
+    read_count = len(readers)
+    return {
+        "readers": [dict(r) for r in readers],
+        "total_readers": read_count,
+        "total_users": total_users,
+        "read_percentage": round((read_count / total_users * 100), 1) if total_users > 0 else 0,
+    }
+
+
+# ── UNREAD COUNT for bell ─────────────────────────────────────────────────────
+@app.get("/api/comunicados/unread/count")
+def comunicados_nao_lidos_count(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    row = db.execute(
+        """SELECT COUNT(*) as cnt FROM communications c
+           WHERE c.is_published = 1 AND c.is_deleted = 0
+           AND c.id NOT IN (
+               SELECT cr.communication_id FROM communication_reads cr WHERE cr.user_key = %s
+           )
+           AND (c.target_audience = 'all' OR c.author_key = %s)""",
+        (user["key"], user["key"])
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+
+# ── COMUNICADOS STATS ─────────────────────────────────────────────────────────
+@app.get("/api/comunicados/stats")
+def comunicados_stats(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    total = db.execute(
+        "SELECT COUNT(*) as cnt FROM communications WHERE is_deleted=0"
+    ).fetchone()["cnt"]
+    published = db.execute(
+        "SELECT COUNT(*) as cnt FROM communications WHERE is_published=1 AND is_deleted=0"
+    ).fetchone()["cnt"]
+    drafts = db.execute(
+        "SELECT COUNT(*) as cnt FROM communications WHERE is_draft=1 AND is_deleted=0 AND author_key=%s",
+        (user["key"],)
+    ).fetchone()["cnt"]
+    return {"total": total, "published": published, "drafts": drafts}
+
 
 # ── EVALUATIONS ────────────────────────────────────────────────────────────────
 
@@ -2641,30 +3124,27 @@ def _update_login_streak(db, user_key):
     )
     return 1
 
-_login_obj_resetado = set()
-
 def _auto_concluir_login(db, user):
     hoje = datetime.datetime.utcnow().date()
     dia_semana = hoje.weekday()
     if dia_semana >= 5:
         return False
-    obj = db.execute("SELECT * FROM objetivos_def WHERE nome LIKE %s AND ativo=1", ("%faça%login%",)).fetchone()
+    # ILIKE = case-insensitive (PostgreSQL); funciona com acentos (faça, ç, ã)
+    obj = db.execute("SELECT * FROM objetivos_def WHERE nome ILIKE %s AND ativo=1", ("%faça%login%",)).fetchone()
     if not obj:
         return False
     hoje_str = hoje.isoformat()
     agora = datetime.datetime.utcnow().isoformat()
     uk = user["key"]
 
-    # One-time reset: remove old manual progress + coins, start fresh
-    if uk not in _login_obj_resetado:
-        _login_obj_resetado.add(uk)
-        old = db.execute("SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s", (obj["id"], uk)).fetchone()
-        if old:
-            db.execute("DELETE FROM objetivos_progress WHERE id=%s", (old["id"],))
-        db.execute("DELETE FROM user_points WHERE user_key=%s AND reason LIKE %s", (uk, "%Login%"))
-        db.execute("UPDATE users SET points=0 WHERE key=%s", (uk,))
-
     prog = db.execute("SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s", (obj["id"], uk)).fetchone()
+
+    # One-time migration: if progress exists but ultimo_reset is NULL (manual/old style), wipe and restart fresh
+    if prog and prog.get("ultimo_reset") is None:
+        db.execute("DELETE FROM objetivos_progress WHERE id=%s", (prog["id"],))
+        db.execute("DELETE FROM user_points WHERE user_key=%s AND reason LIKE %s", (uk, "%Login%"))
+        prog = None
+
     if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje_str:
         return False
 
@@ -2674,7 +3154,7 @@ def _auto_concluir_login(db, user):
     else:
         pid = str(uuid.uuid4())
         db.execute("INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (pid, obj["id"], uk, obj["meta_valor"], "concluido", agora, agora, agora))
+                    (pid, obj["id"], uk, obj["meta_valor"], "concluido", hoje_str, agora, agora))
     _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Login diário: {obj['nome']}", notify=False)
     _update_login_streak(db, uk)
     _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")

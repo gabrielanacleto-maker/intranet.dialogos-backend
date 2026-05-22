@@ -353,6 +353,52 @@ def init_db():
                 updated_at TEXT NOT NULL
             )
         """)
+        # ── COMUNICADOS ────────────────────────────────────────────────────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS communications (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                author_key TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                is_draft INTEGER NOT NULL DEFAULT 1,
+                is_published INTEGER NOT NULL DEFAULT 0,
+                published_at TEXT,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT,
+                deleted_by_key TEXT,
+                target_audience TEXT NOT NULL DEFAULT 'all',
+                priority TEXT NOT NULL DEFAULT 'normal',
+                views_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS communication_reads (
+                id TEXT PRIMARY KEY,
+                communication_id TEXT NOT NULL,
+                user_key TEXT NOT NULL,
+                read_at TEXT NOT NULL,
+                read_count INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(communication_id, user_key)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS communication_notifications (
+                id TEXT PRIMARY KEY,
+                communication_id TEXT NOT NULL,
+                notified_at TEXT NOT NULL,
+                total_recipients INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_comm_author ON communications(author_key)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_comm_published ON communications(is_published)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_comm_deleted ON communications(is_deleted)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_comm_audience ON communications(target_audience)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_comm_created ON communications(created_at DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_comm ON communication_reads(communication_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user ON communication_reads(user_key)")
         conn.commit()
         print("✅ Banco de dados inicializado.")
 
