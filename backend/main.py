@@ -3781,8 +3781,6 @@ def excluir_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(ge
     db.execute("DELETE FROM task_history WHERE tarefa_id = %s", (tarefa_id,))
     db.execute("DELETE FROM tarefas WHERE id = %s", (tarefa_id,))
 
-    _log_atividade(db, "tarefa_excluida", user["key"],
-                   f"{user['name']} excluiu a tarefa: {tarefa.get('titulo', '')}")
     db.commit()
     return {"ok": True}
 
