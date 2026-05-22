@@ -2679,7 +2679,7 @@ def _auto_concluir_login(db, user):
     _update_login_streak(db, uk)
     db.commit()
     ws_emit_to_user(uk, "objective_completed", {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"]})
-    return True
+    return obj["nome"]
 
 @app.post("/api/objetivos/{oid}/progresso")
 def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
