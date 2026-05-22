@@ -1071,6 +1071,12 @@ def _comunicado_to_dict(row) -> dict:
         "updated_at": row.get("updated_at"),
     }
 
+def _comunicado_to_list_dict(row) -> dict:
+    """Same as _comunicado_to_dict but WITHOUT content (for listing)."""
+    d = _comunicado_to_dict(row)
+    d.pop("content", None)
+    return d
+
 
 # ── CREATE comunicado ─────────────────────────────────────────────────────────
 @app.post("/api/comunicados")
@@ -1163,7 +1169,7 @@ def listar_comunicados(
         read_ids.add(r["communication_id"])
     result = []
     for row in rows:
-        d = _comunicado_to_dict(row)
+        d = _comunicado_to_list_dict(row)
         d["is_read"] = row["id"] in read_ids
         result.append(d)
     return {"comunicados": result, "total": total, "page": page, "per_page": per_page}
