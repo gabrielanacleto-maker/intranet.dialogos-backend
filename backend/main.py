@@ -2640,37 +2640,44 @@ def _update_login_streak(db, user_key):
     )
     return 1
 
+_login_obj_resetado = set()
+
 def _auto_concluir_login(db, user):
     hoje = datetime.datetime.utcnow().date()
     dia_semana = hoje.weekday()
     if dia_semana >= 5:
         return
-    obj = db.execute("SELECT * FROM objetivos_def WHERE LOWER(nome)=%s AND ativo=1", ("faça login",)).fetchone()
+    obj = db.execute("SELECT * FROM objetivos_def WHERE nome LIKE %s AND ativo=1", ("%faça%login%",)).fetchone()
     if not obj:
         return
     hoje_str = hoje.isoformat()
     agora = datetime.datetime.utcnow().isoformat()
-    prog = db.execute(
-        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-        (obj["id"], user["key"])
-    ).fetchone()
+    uk = user["key"]
+
+    # One-time reset: remove old manual progress + coins, start fresh
+    if uk not in _login_obj_resetado:
+        _login_obj_resetado.add(uk)
+        old = db.execute("SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s", (obj["id"], uk)).fetchone()
+        if old:
+            db.execute("DELETE FROM objetivos_progress WHERE id=%s", (old["id"],))
+        db.execute("DELETE FROM user_points WHERE user_key=%s AND reason LIKE %s", (uk, "%Login%"))
+        db.execute("UPDATE users SET points=0 WHERE key=%s", (uk,))
+
+    prog = db.execute("SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s", (obj["id"], uk)).fetchone()
     if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje_str:
         return
+
     if prog:
-        db.execute(
-            "UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
-            (obj["meta_valor"], agora, prog["id"])
-        )
+        db.execute("UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
+                    (obj["meta_valor"], agora, prog["id"]))
     else:
         pid = str(uuid.uuid4())
-        db.execute(
-            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (pid, obj["id"], user["key"], obj["meta_valor"], "concluido", agora, agora, agora)
-        )
-    _award_dcoins(db, user["key"], obj["recompensa_dcoins"], f"Login diário: {obj['nome']}")
-    _update_login_streak(db, user["key"])
+        db.execute("INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (pid, obj["id"], uk, obj["meta_valor"], "concluido", agora, agora, agora))
+    _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Login diário: {obj['nome']}")
+    _update_login_streak(db, uk)
     db.commit()
-    ws_emit_to_user(user["key"], "objective_completed", {"id": obj["id"], "user_key": user["key"], "status": "concluido", "progresso": obj["meta_valor"]})
+    ws_emit_to_user(uk, "objective_completed", {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"]})
 
 @app.post("/api/objetivos/{oid}/progresso")
 def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
