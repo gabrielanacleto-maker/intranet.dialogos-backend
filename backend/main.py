@@ -2677,6 +2677,7 @@ def _auto_concluir_login(db, user):
                     (pid, obj["id"], uk, obj["meta_valor"], "concluido", agora, agora, agora))
     _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Login diário: {obj['nome']}", notify=False)
     _update_login_streak(db, uk)
+    _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
     db.commit()
     ws_emit_to_user(uk, "objective_completed", {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"]})
     return obj["nome"]
@@ -2747,6 +2748,7 @@ def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_us
         _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"],
                       f"Objetivo concluído: {objetivo['nome']}")
         _update_streak(db, user["key"])
+        _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
 
     _log_objective_audit(db, oid, user["key"], "progresso",
                          f"Progresso atualizado para {novo_progresso}/{objetivo['meta_valor']} (status: {novo_status})")
