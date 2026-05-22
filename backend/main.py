@@ -367,10 +367,11 @@ def login(body: LoginRequest, db=Depends(get_db)):
                 ntype="system", audience="all",
                 sender_key=user["key"], sender_name=user["name"],
                 play_sound=False)
-        _auto_concluir_login(db, user)
+        auto_concluiu = _auto_concluir_login(db, user)
         return {
             "token": token,
             "must_change_password": not user["password_changed"],
+            "auto_concluiu_login": auto_concluiu,
             "user": {
                 "key": user["key"], "name": user["name"], "initials": user["initials"],
                 "role": user["role"], "dept": user["dept"], "level": user["level"],
@@ -2646,10 +2647,10 @@ def _auto_concluir_login(db, user):
     hoje = datetime.datetime.utcnow().date()
     dia_semana = hoje.weekday()
     if dia_semana >= 5:
-        return
+        return False
     obj = db.execute("SELECT * FROM objetivos_def WHERE nome LIKE %s AND ativo=1", ("%faça%login%",)).fetchone()
     if not obj:
-        return
+        return False
     hoje_str = hoje.isoformat()
     agora = datetime.datetime.utcnow().isoformat()
     uk = user["key"]
@@ -2665,7 +2666,7 @@ def _auto_concluir_login(db, user):
 
     prog = db.execute("SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s", (obj["id"], uk)).fetchone()
     if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje_str:
-        return
+        return False
 
     if prog:
         db.execute("UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
@@ -2674,10 +2675,11 @@ def _auto_concluir_login(db, user):
         pid = str(uuid.uuid4())
         db.execute("INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                     (pid, obj["id"], uk, obj["meta_valor"], "concluido", agora, agora, agora))
-    _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Login diário: {obj['nome']}")
+    _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Login diário: {obj['nome']}", notify=False)
     _update_login_streak(db, uk)
     db.commit()
     ws_emit_to_user(uk, "objective_completed", {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"]})
+    return True
 
 @app.post("/api/objetivos/{oid}/progresso")
 def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
@@ -2796,7 +2798,7 @@ def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
     ws_emit("objective_updated", {"type": "reset", "resetados": resetados, "user_key": user["key"]})
     return {"ok": True, "resetados": resetados}
 
-def _award_dcoins(db, user_key, coins, reason):
+def _award_dcoins(db, user_key, coins, reason, notify=True):
     pid = str(uuid.uuid4())
     now = datetime.datetime.utcnow().isoformat()
     target = db.execute("SELECT key, points FROM users WHERE key=%s", (user_key,)).fetchone()
@@ -2808,11 +2810,12 @@ def _award_dcoins(db, user_key, coins, reason):
     )
     new_total = (target["points"] or 0) + coins
     db.execute("UPDATE users SET points=%s WHERE key=%s", (new_total, user_key))
-    _notify(db, title="D-Cash recebido",
-            message=f"Você ganhou {coins} D-Cash por: {reason}",
-            ntype="xp", target_user_key=user_key,
-            sender_key="system", sender_name="Sistema",
-            reference_id=pid, play_sound=True)
+    if notify:
+        _notify(db, title="D-Cash recebido",
+                message=f"Você ganhou {coins} D-Cash por: {reason}",
+                ntype="xp", target_user_key=user_key,
+                sender_key="system", sender_name="Sistema",
+                reference_id=pid, play_sound=True)
 
 @app.get("/api/objetivos/stats")
 def objetivos_stats(user=Depends(get_current_user), db=Depends(get_db)):
