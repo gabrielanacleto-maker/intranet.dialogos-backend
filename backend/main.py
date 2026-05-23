@@ -3155,6 +3155,44 @@ def _update_login_streak(db, user_key):
     )
     return 1
 
+def _auto_progress_tarefas(db, user_key):
+    hoje = datetime.datetime.utcnow().date().isoformat()
+    agora = datetime.datetime.utcnow().isoformat()
+    objetivos = db.execute(
+        "SELECT * FROM objetivos_def WHERE categoria='tarefas' AND ativo=1"
+    ).fetchall()
+    for obj in objetivos:
+        prog = db.execute(
+            "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+            (obj["id"], user_key)
+        ).fetchone()
+
+        if prog and prog["status"] == "concluido":
+            continue
+
+        if prog:
+            novo = (prog["progresso_atual"] or 0) + 1
+            status = "concluido" if novo >= obj["meta_valor"] else "progresso"
+            db.execute(
+                "UPDATE objetivos_progress SET progresso_atual=%s, status=%s, ultima_atualizacao=%s WHERE id=%s",
+                (novo, status, agora, prog["id"])
+            )
+        else:
+            pid = str(uuid.uuid4())
+            novo = 1
+            status = "concluido" if novo >= obj["meta_valor"] else "progresso"
+            db.execute(
+                "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (pid, obj["id"], user_key, novo, status, hoje, agora, agora)
+            )
+
+        if status == "concluido":
+            _award_dcoins(db, user_key, obj["recompensa_dcoins"], f"Objetivo concluído: {obj['nome']}")
+            _update_streak(db, user_key)
+
+        ev = "objective_completed" if status == "concluido" else "objective_updated"
+        ws_emit_to_user(user_key, ev, {"id": obj["id"], "user_key": user_key, "status": status, "progresso": novo, "nome": obj["nome"]})
+
 def _auto_concluir_login(db, user):
     hoje = datetime.datetime.utcnow().date()
     dia_semana = hoje.weekday()
@@ -3190,7 +3228,7 @@ def _auto_concluir_login(db, user):
     _update_login_streak(db, uk)
     _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
     db.commit()
-    ws_emit_to_user(uk, "objective_completed", {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"]})
+    ws_emit_to_user(uk, "objective_completed", {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"], "nome": obj["nome"]})
     return obj["nome"]
 
 @app.post("/api/objetivos/{oid}/progresso")
@@ -3463,7 +3501,7 @@ def concluir_objetivo(oid: str, body: dict = None, user=Depends(get_current_user
                          f"Objetivo concluído manualmente. Recompensa: {objetivo['recompensa_dcoins']} D-Cash")
     db.commit()
     ws_emit_to_user(user["key"], "objective_completed",
-                    {"id": oid, "user_key": user["key"], "status": "concluido", "progresso": objetivo["meta_valor"]})
+                    {"id": oid, "user_key": user["key"], "status": "concluido", "progresso": objetivo["meta_valor"], "nome": objetivo["nome"]})
     return {"ok": True}
 
 @app.post("/api/objetivos/{oid}/incrementar")
@@ -3522,7 +3560,7 @@ def incrementar_objetivo(oid: str, body: dict = None, user=Depends(get_current_u
                          f"Incremento de {increment}: {novo_progresso}/{objetivo['meta_valor']} (status: {novo_status})")
     db.commit()
     ev = "objective_completed" if novo_status == "concluido" else "objective_updated"
-    ws_emit_to_user(user["key"], ev, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso})
+    ws_emit_to_user(user["key"], ev, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso, "nome": objetivo["nome"]})
     return {"ok": True, "status": novo_status, "progresso": novo_progresso}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3851,6 +3889,8 @@ def concluir_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(g
         "UPDATE tarefas SET concluida=1, concluida_em=%s, updated_at=%s WHERE id=%s",
         (now, now, tarefa_id)
     )
+
+    _auto_progress_tarefas(db, user["key"])
 
     tipo_atv = "tarefa_gestor" if tarefa.get("tipo") == "gestor" else "tarefa_rotina"
     _log_atividade(db, tipo_atv, user["key"],
@@ -4213,6 +4253,8 @@ def concluir_tarefa_agora(tarefa_id: str, user=Depends(get_current_user), db=Dep
     tipo_atv = "tarefa_gestor" if tarefa.get("tipo") == "gestor" else "tarefa_rotina"
     _log_atividade(db, tipo_atv, user["key"],
                    f"{user['name']} concluiu a tarefa: {tarefa.get('titulo', '')}")
+    _auto_progress_tarefas(db, user["key"])
+
     _log_task_history(db, tarefa_id, "concluida", user["key"], user["name"],
                       f"Tarefa concluída. Duração: {total_duration}s")
 
