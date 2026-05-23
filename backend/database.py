@@ -273,6 +273,26 @@ def init_db():
         except:
             pass
 
+        # ── OUVIDORIA ───────────────────────────────────────────────────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS ouvidoria (
+                id TEXT PRIMARY KEY,
+                author_key TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'aberta',
+                anonymous INTEGER NOT NULL DEFAULT 0,
+                responses TEXT DEFAULT '[]',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        try:
+            c.execute("ALTER TABLE ouvidoria ADD COLUMN IF NOT EXISTS anonymous INTEGER DEFAULT 0")
+        except:
+            pass
+
         # ── TASK COMMENTS ──────────────────────────────────────────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS task_comments (
