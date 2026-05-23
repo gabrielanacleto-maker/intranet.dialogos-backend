@@ -84,6 +84,7 @@ class OuvidoriaRequest(BaseModel):
     category: str
     text: str
     author_display_name: Optional[str] = None
+    anonymous: bool = False
 
 class OuvidoriaStatusRequest(BaseModel):
     status: str
