@@ -1170,6 +1170,39 @@ def listar_comunicados(
     return {"comunicados": result, "total": total, "page": page, "per_page": per_page}
 
 
+# ── UNREAD COUNT for bell ─────────────────────────────────────────────────────
+@app.get("/api/comunicados/unread/count")
+def comunicados_nao_lidos_count(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    row = db.execute(
+        """SELECT COUNT(*) as cnt FROM communications c
+           WHERE c.is_published = 1 AND c.is_deleted = 0
+           AND c.id NOT IN (
+               SELECT cr.communication_id FROM communication_reads cr WHERE cr.user_key = %s
+           )
+           AND (c.target_audience = 'all' OR c.author_key = %s)""",
+        (user["key"], user["key"])
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+
+# ── COMUNICADOS STATS ─────────────────────────────────────────────────────────
+@app.get("/api/comunicados/stats")
+def comunicados_stats(user=Depends(get_current_user), db=Depends(get_db)):
+    _ensure_comunicados_table(db)
+    total = db.execute(
+        "SELECT COUNT(*) as cnt FROM communications WHERE is_deleted=0"
+    ).fetchone()["cnt"]
+    published = db.execute(
+        "SELECT COUNT(*) as cnt FROM communications WHERE is_published=1 AND is_deleted=0"
+    ).fetchone()["cnt"]
+    drafts = db.execute(
+        "SELECT COUNT(*) as cnt FROM communications WHERE is_draft=1 AND is_deleted=0 AND author_key=%s",
+        (user["key"],)
+    ).fetchone()["cnt"]
+    return {"total": total, "published": published, "drafts": drafts}
+
+
 # ── GET single comunicado ────────────────────────────────────────────────────
 @app.get("/api/comunicados/{comm_id}")
 def get_comunicado(comm_id: str, user=Depends(get_current_user), db=Depends(get_db)):
@@ -1359,39 +1392,6 @@ def listar_leitura_comunicado(comm_id: str, user=Depends(get_current_user), db=D
         "total_users": total_users,
         "read_percentage": round((read_count / total_users * 100), 1) if total_users > 0 else 0,
     }
-
-
-# ── UNREAD COUNT for bell ─────────────────────────────────────────────────────
-@app.get("/api/comunicados/unread/count")
-def comunicados_nao_lidos_count(user=Depends(get_current_user), db=Depends(get_db)):
-    _ensure_comunicados_table(db)
-    row = db.execute(
-        """SELECT COUNT(*) as cnt FROM communications c
-           WHERE c.is_published = 1 AND c.is_deleted = 0
-           AND c.id NOT IN (
-               SELECT cr.communication_id FROM communication_reads cr WHERE cr.user_key = %s
-           )
-           AND (c.target_audience = 'all' OR c.author_key = %s)""",
-        (user["key"], user["key"])
-    ).fetchone()
-    return {"count": row["cnt"] if row else 0}
-
-
-# ── COMUNICADOS STATS ─────────────────────────────────────────────────────────
-@app.get("/api/comunicados/stats")
-def comunicados_stats(user=Depends(get_current_user), db=Depends(get_db)):
-    _ensure_comunicados_table(db)
-    total = db.execute(
-        "SELECT COUNT(*) as cnt FROM communications WHERE is_deleted=0"
-    ).fetchone()["cnt"]
-    published = db.execute(
-        "SELECT COUNT(*) as cnt FROM communications WHERE is_published=1 AND is_deleted=0"
-    ).fetchone()["cnt"]
-    drafts = db.execute(
-        "SELECT COUNT(*) as cnt FROM communications WHERE is_draft=1 AND is_deleted=0 AND author_key=%s",
-        (user["key"],)
-    ).fetchone()["cnt"]
-    return {"total": total, "published": published, "drafts": drafts}
 
 
 # ── EVALUATIONS ────────────────────────────────────────────────────────────────
