@@ -2104,7 +2104,9 @@ def get_ouvidoria(user=Depends(get_current_user), db=Depends(get_db)):
         item = dict(r)
         if isinstance(item.get("responses"), str):
             item["responses"] = json.loads(item["responses"])
-        if is_ouvidor and item.get("anonymous"):
+        if user.get("is_admin") or user.get("is_admin_user"):
+            item["author_name"] = "Anônimo"
+        elif is_ouvidor and item.get("anonymous"):
             item["author_name"] = "Anônimo"
         result.append(item)
     return result
