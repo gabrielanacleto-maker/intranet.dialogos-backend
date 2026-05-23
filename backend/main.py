@@ -3272,14 +3272,14 @@ def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
                     if uk not in afetados:
                         afetados[uk] = []
                     afetados[uk].append(obj["id"])
-            db.execute(
+            cur = db.execute(
                 """UPDATE objetivos_progress SET progresso_atual=0,
                    status=CASE WHEN status='concluido' THEN 'pendente' ELSE status END,
                    ultimo_reset=%s
                    WHERE objetivo_id=%s""",
                 (hoje_dt, obj["id"])
             )
-            resetados += db.execute("SELECT changes()").fetchone()[0]
+            resetados += cur.rowcount
     db.commit()
     for uk, oids in afetados.items():
         for oid in oids:
