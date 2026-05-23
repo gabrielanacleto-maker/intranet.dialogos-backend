@@ -2102,6 +2102,8 @@ def get_ouvidoria(user=Depends(get_current_user), db=Depends(get_db)):
     result = []
     for r in rows:
         item = dict(r)
+        if isinstance(item.get("responses"), str):
+            item["responses"] = json.loads(item["responses"])
         if is_ouvidor and item.get("anonymous"):
             item["author_name"] = "Anônimo"
         result.append(item)
@@ -2125,6 +2127,13 @@ def update_ouvidoria_status(oid: str, body: OuvidoriaStatusRequest, user=Depends
     require_ouvidor(user)
     db.execute("UPDATE ouvidoria SET status=%s WHERE id=%s", (body.status, oid))
     log_audit(db, user["key"], "ouvidoria_status", None, f"Status alterado para {body.status}")
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/ouvidoria/{oid}")
+def delete_ouvidoria(oid: str, user=Depends(get_current_user), db=Depends(get_db)):
+    require_ouvidor(user)
+    db.execute("DELETE FROM ouvidoria WHERE id=%s", (oid,))
     db.commit()
     return {"ok": True}
 
