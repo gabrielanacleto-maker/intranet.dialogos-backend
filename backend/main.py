@@ -2092,28 +2092,37 @@ def delete_social_room_file(room_id: str, file_id: str, user=Depends(get_current
 @app.get("/api/ouvidoria")
 def get_ouvidoria(user=Depends(get_current_user), db=Depends(get_db)):
     is_ouvidor = user.get("is_ouvidor") or (user.get("role") or "").lower() == "ouvidor"
-    if not is_ouvidor and not user.get("is_admin") and not user.get("is_admin_user"):
-        raise HTTPException(status_code=403, detail="Acesso restrito a Ouvidores.")
-    rows = db.execute("SELECT * FROM ouvidoria ORDER BY created_at DESC").fetchall()
-    return [dict(r) for r in rows]
+    if is_ouvidor or user.get("is_admin") or user.get("is_admin_user"):
+        rows = db.execute("SELECT * FROM ouvidoria ORDER BY created_at DESC").fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM ouvidoria WHERE author_key=%s ORDER BY created_at DESC",
+            (user["key"],)
+        ).fetchall()
+    result = []
+    for r in rows:
+        item = dict(r)
+        if is_ouvidor and item.get("anonymous"):
+            item["author_name"] = "Anônimo"
+        result.append(item)
+    return result
 
 @app.post("/api/ouvidoria")
 def create_ouvidoria(body: OuvidoriaRequest, user=Depends(get_current_user), db=Depends(get_db)):
     oid = str(uuid.uuid4())
-    db.execute("""INSERT INTO ouvidoria (id, author_key, author_name, category, text, status, created_at)
-        VALUES (%s,%s,%s,%s,%s,'aberta',%s)""",
-        (oid, user["key"], user["name"], body.category, body.text,
-        datetime.datetime.utcnow().isoformat())
+    display_name = body.author_display_name or user["name"]
+    db.execute(
+        "INSERT INTO ouvidoria (id, author_key, author_name, category, text, status, anonymous, created_at) VALUES (%s,%s,%s,%s,%s,'aberta',%s,%s)",
+        (oid, user["key"], display_name, body.category, body.text,
+         int(body.anonymous), datetime.datetime.utcnow().isoformat())
     )
     db.commit()
-    ws_emit("objective_updated", {"type": "created", "id": oid, "user_key": user["key"]})
+    ws_emit("ouvidoria_updated", {"type": "created", "id": oid, "user_key": user["key"]})
     return {"ok": True, "id": oid}
 
 @app.put("/api/ouvidoria/{oid}/status")
 def update_ouvidoria_status(oid: str, body: OuvidoriaStatusRequest, user=Depends(get_current_user), db=Depends(get_db)):
-    is_ouvidor = user.get("is_ouvidor") or (user.get("role") or "").lower() == "ouvidor"
-    if not is_ouvidor and not user.get("is_admin") and not user.get("is_admin_user"):
-        raise HTTPException(status_code=403, detail="Apenas Ouvidores podem alterar status.")
+    require_ouvidor(user)
     db.execute("UPDATE ouvidoria SET status=%s WHERE id=%s", (body.status, oid))
     log_audit(db, user["key"], "ouvidoria_status", None, f"Status alterado para {body.status}")
     db.commit()
@@ -2122,25 +2131,29 @@ def update_ouvidoria_status(oid: str, body: OuvidoriaStatusRequest, user=Depends
 @app.post("/api/ouvidoria/{oid}/respond")
 def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(get_current_user), db=Depends(get_db)):
     is_ouvidor = user.get("is_ouvidor") or (user.get("role") or "").lower() == "ouvidor"
-    if not is_ouvidor and not user.get("is_admin") and not user.get("is_admin_user"):
-        raise HTTPException(status_code=403, detail="Apenas Ouvidores podem responder.")
-    ouid = db.execute("SELECT responses FROM ouvidoria WHERE id=%s", (oid,)).fetchone()
-    if not ouid:
+    row = db.execute("SELECT * FROM ouvidoria WHERE id=%s", (oid,)).fetchone()
+    if not row:
         raise HTTPException(status_code=404, detail="Ouvidoria não encontrada")
-    responses = json.loads(ouid[0] or "[]")
+    is_owner = row["author_key"] == user["key"]
+    if not is_ouvidor and not user.get("is_admin") and not user.get("is_admin_user") and not is_owner:
+        raise HTTPException(status_code=403, detail="Sem permissão para responder.")
+    responses = json.loads(row["responses"] or "[]")
     responses.append({
-        "responder_key": user["key"],
-        "responder_name": user["name"],
+        "author_key": user["key"],
+        "author_name": user["name"],
+        "is_ouvidor": is_ouvidor,
         "text": body.text,
         "created_at": datetime.datetime.utcnow().isoformat()
     })
     db.execute("UPDATE ouvidoria SET responses=%s WHERE id=%s", (json.dumps(responses), oid))
-    # Notify original author
-    ouid_full = db.execute("SELECT author_key FROM ouvidoria WHERE id=%s", (oid,)).fetchone()
-    if ouid_full and ouid_full["author_key"] != user["key"]:
+    # Notify the other party
+    other_key = row["author_key"]
+    if other_key == user["key"]:
+        other_key = None
+    if other_key:
         _notify(db, title="📬 Ouvidoria respondida",
                 message=f"{user['name']} respondeu sua manifestação",
-                ntype="system", target_user_key=ouid_full["author_key"],
+                ntype="system", target_user_key=other_key,
                 sender_key=user["key"], sender_name=user["name"],
                 reference_id=oid, play_sound=True)
     db.commit()
