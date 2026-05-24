@@ -596,6 +596,14 @@ def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user), d
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.patch("/api/users/me/about")
+def update_about_me(body: dict, user=Depends(get_current_user), db=Depends(get_db)):
+    about_text = (body or {}).get("text", "")
+    db.execute("UPDATE users SET about_me=%s WHERE key=%s", (about_text, user["key"]))
+    db.commit()
+    return {"ok": True}
+
+
 @app.delete("/api/mural/{item_id}")
 def delete_mural(item_id: str, user=Depends(get_current_user), db=Depends(get_db)):
     item = db.execute("SELECT * FROM mural_items WHERE id=%s", (item_id,)).fetchone()

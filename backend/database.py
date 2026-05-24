@@ -71,17 +71,11 @@ def init_db():
         c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_admin INTEGER DEFAULT 0")
 
         # ── NOVAS TABELAS ──────────────────────────────────────────────────────
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_diretor INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_leader INTEGER DEFAULT 0")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_orcoma INTEGER DEFAULT 0")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS hire_date TEXT DEFAULT ''")  
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_position TEXT DEFAULT 'colaborador'")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_key TEXT DEFAULT NULL")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS nivel_dourado INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url TEXT DEFAULT ''")
-        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_role TEXT DEFAULT ''")
-        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_rh INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_admin INTEGER DEFAULT 0")
 
         # post_views table
         c.execute("""
