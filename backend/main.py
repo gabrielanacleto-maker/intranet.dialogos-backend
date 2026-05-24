@@ -5006,18 +5006,17 @@ def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
     if filter == "self":
         rows = db.execute(
             """SELECT p.* FROM ratimbum_posts p
-               WHERE p.author_type = 'user'
+               WHERE p.author_key = %s
                ORDER BY p.created_at DESC LIMIT %s OFFSET %s""",
-            (limit, offset)
+            (user_key, limit, offset)
         ).fetchall()
     elif filter == "team":
         manager_key = user.get("manager_key")
         if manager_key:
             team_keys = [r["key"] for r in
-                         db.execute("SELECT key FROM users WHERE manager_key=%s OR key=%s",
-                                    (user_key, user_key)).fetchall()]
-            if not team_keys:
-                team_keys = [user_key]
+                         db.execute("SELECT key FROM users WHERE manager_key=%s",
+                                    (manager_key,)).fetchall()]
+            team_keys.append(user_key)
         else:
             team_keys = [user_key]
         placeholders = ",".join("%s" for _ in team_keys)
