@@ -227,3 +227,6 @@ class CreateRatimbumPostRequest(BaseModel):
 
 class ReactRatimbumRequest(BaseModel):
     emoji: str
+
+class CreateRatimbumReplyRequest(BaseModel):
+    text: str

@@ -440,6 +440,7 @@ def init_db():
                 UNIQUE(post_id, user_key, emoji)
             )
         """)
+        c.execute("ALTER TABLE ratimbum_posts ADD COLUMN IF NOT EXISTS parent_id TEXT DEFAULT NULL")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_created ON ratimbum_posts(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_reactions_post ON ratimbum_reactions(post_id)")
         conn.commit()

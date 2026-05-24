@@ -4995,6 +4995,28 @@ def _resolve_mentions(text: str, db):
                 mentioned.add(user['key'])
     return list(mentioned)
 
+def _format_ratimbum_post(row: dict):
+    d = dict(row)
+    d["reactions"] = json.loads(d.get("reactions") or "{}")
+    d["mentions"] = json.loads(d.get("mentions") or "[]")
+    return d
+
+def _build_post_ws_payload(post_id, text, mentions, user, author_type="user"):
+    return {
+        "id": post_id,
+        "author_key": user["key"] if author_type == "user" else "system",
+        "author_name": user["name"] if author_type == "user" else "Axis",
+        "author_initials": user.get("initials", "AX") if author_type == "user" else "AX",
+        "author_color": user.get("color", "#C9A84C") if author_type == "user" else "#C9A84C",
+        "author_photo_url": user.get("photo_url", "") if author_type == "user" else "",
+        "author_role": user.get("role", "") if author_type == "user" else "Sistema",
+        "author_type": author_type,
+        "text": text,
+        "mentions": mentions,
+        "reactions": {},
+        "created_at": datetime.datetime.utcnow().isoformat(),
+    }
+
 
 @app.get("/api/ratimbum/posts")
 def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
@@ -5006,7 +5028,7 @@ def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
     if filter == "self":
         rows = db.execute(
             """SELECT p.* FROM ratimbum_posts p
-               WHERE p.author_key = %s
+               WHERE p.parent_id IS NULL AND p.author_key = %s
                ORDER BY p.created_at DESC LIMIT %s OFFSET %s""",
             (user_key, limit, offset)
         ).fetchall()
@@ -5022,24 +5044,39 @@ def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
         placeholders = ",".join("%s" for _ in team_keys)
         rows = db.execute(
             f"""SELECT p.* FROM ratimbum_posts p
-                WHERE p.author_key IN ({placeholders})
+                WHERE p.parent_id IS NULL AND p.author_key IN ({placeholders})
                 ORDER BY p.created_at DESC LIMIT %s OFFSET %s""",
             team_keys + [limit, offset]
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT * FROM ratimbum_posts ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            "SELECT * FROM ratimbum_posts WHERE parent_id IS NULL ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (limit, offset)
         ).fetchall()
 
-    total = db.execute("SELECT COUNT(*) FROM ratimbum_posts").fetchone()[0]
+    total = db.execute("SELECT COUNT(*) FROM ratimbum_posts WHERE parent_id IS NULL").fetchone()[0]
     result = []
     for r in rows:
-        d = dict(r)
-        d["reactions"] = json.loads(d.get("reactions") or "{}")
-        d["mentions"] = json.loads(d.get("mentions") or "[]")
+        d = _format_ratimbum_post(r)
+        post_id = d["id"]
+        reply_count = db.execute(
+            "SELECT COUNT(*) FROM ratimbum_posts WHERE parent_id=%s", (post_id,)
+        ).fetchone()[0]
+        d["reply_count"] = reply_count
         result.append(d)
     return {"posts": result, "total": total}
+
+
+@app.get("/api/ratimbum/posts/{post_id}/replies")
+def get_ratimbum_replies(post_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    parent = db.execute("SELECT id FROM ratimbum_posts WHERE id=%s", (post_id,)).fetchone()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Post não encontrado.")
+    rows = db.execute(
+        "SELECT * FROM ratimbum_posts WHERE parent_id=%s ORDER BY created_at ASC",
+        (post_id,)
+    ).fetchall()
+    return {"replies": [_format_ratimbum_post(r) for r in rows]}
 
 
 @app.post("/api/ratimbum/posts")
@@ -5090,21 +5127,48 @@ def create_ratimbum_post(body: CreateRatimbumPostRequest,
                     reference_id=post_id, play_sound=True)
 
     db.commit()
-    ws_emit("ratimbum_new_post", {
-        "id": post_id,
-        "author_key": user["key"],
-        "author_name": user["name"],
-        "author_initials": user["initials"],
-        "author_color": user["color"],
-        "author_photo_url": user.get("photo_url", ""),
-        "author_role": user.get("role", ""),
-        "author_type": "user",
-        "text": safe_text_with_mentions,
-        "mentions": mentions,
-        "reactions": {},
-        "created_at": datetime.datetime.utcnow().isoformat(),
-    }, rooms=["all"])
+    ws_emit("ratimbum_new_post", _build_post_ws_payload(post_id, safe_text_with_mentions, mentions, user), rooms=["all"])
     return {"ok": True, "id": post_id}
+
+
+@app.post("/api/ratimbum/posts/{post_id}/reply")
+def reply_ratimbum_post(post_id: str, body: CreateRatimbumReplyRequest,
+                         user=Depends(get_current_user), db=Depends(get_db)):
+    _check_ratimbum_rate_limit(user["key"])
+    parent = db.execute("SELECT id FROM ratimbum_posts WHERE id=%s", (post_id,)).fetchone()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Post não encontrado.")
+    safe_text = _sanitize_text(body.text or "")
+    if not safe_text.strip():
+        raise HTTPException(status_code=400, detail="A mensagem não pode estar vazia.")
+
+    mentions = _resolve_mentions(safe_text, db)
+    reply_id = str(uuid.uuid4())
+    safe_text_with_mentions = safe_text
+    for m in mentions:
+        if m == '@todos':
+            safe_text_with_mentions = safe_text_with_mentions.replace('@todos', '@todos')
+        else:
+            user_row = db.execute("SELECT name FROM users WHERE key=%s", (m,)).fetchone()
+            if user_row:
+                safe_text_with_mentions = safe_text_with_mentions.replace(f'@{m}', f'@{user_row["name"]}')
+
+    db.execute("""INSERT INTO ratimbum_posts
+        (id, author_key, author_name, author_initials, author_color, author_photo_url,
+         author_role, author_type, text, mentions, reactions, created_at, parent_id)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (reply_id, user["key"], user["name"], user["initials"], user["color"],
+         user.get("photo_url", ""), user.get("role", ""),
+         'user', safe_text_with_mentions,
+         json.dumps(mentions), '{}',
+         datetime.datetime.utcnow().isoformat(), post_id))
+
+    db.commit()
+    ws_emit("ratimbum_new_reply", {
+        "reply": _build_post_ws_payload(reply_id, safe_text_with_mentions, mentions, user),
+        "parent_id": post_id,
+    }, rooms=["all"])
+    return {"ok": True, "id": reply_id}
 
 
 @app.delete("/api/ratimbum/posts/{post_id}")
@@ -5117,6 +5181,7 @@ def delete_ratimbum_post(post_id: str, user=Depends(get_current_user), db=Depend
     if post["author_key"] != user["key"] and not user.get("is_admin") and not user.get("is_admin_user"):
         raise HTTPException(status_code=403, detail="Sem permissão para remover este post.")
     db.execute("DELETE FROM ratimbum_reactions WHERE post_id=%s", (post_id,))
+    db.execute("DELETE FROM ratimbum_posts WHERE parent_id=%s", (post_id,))
     db.execute("DELETE FROM ratimbum_posts WHERE id=%s", (post_id,))
     log_audit(db, user["key"], "ratimbum_post_delete", user["key"],
               f"Post removido do RaTimBum: {(post.get('text') or '')[:80]}")
@@ -5125,9 +5190,9 @@ def delete_ratimbum_post(post_id: str, user=Depends(get_current_user), db=Depend
     return {"ok": True}
 
 
-@app.post("/api/ratimbum/posts/{post_id}/react")
-def react_ratimbum_post(post_id: str, body: ReactRatimbumRequest,
-                         user=Depends(get_current_user), db=Depends(get_db)):
+@app.post("/api/ratimbum/posts/{post_id}/reactions")
+def add_ratimbum_reaction(post_id: str, body: ReactRatimbumRequest,
+                           user=Depends(get_current_user), db=Depends(get_db)):
     _check_ratimbum_rate_limit(user["key"])
     post = db.execute("SELECT * FROM ratimbum_posts WHERE id=%s", (post_id,)).fetchone()
     if not post:
@@ -5141,37 +5206,65 @@ def react_ratimbum_post(post_id: str, body: ReactRatimbumRequest,
         "SELECT id FROM ratimbum_reactions WHERE post_id=%s AND user_key=%s AND emoji=%s",
         (post_id, user["key"], emoji)
     ).fetchone()
+    if existing:
+        raise HTTPException(status_code=409, detail="Você já reagiu com este emoji.")
+
+    reaction_id = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO ratimbum_reactions (id, post_id, user_key, emoji, created_at) VALUES (%s,%s,%s,%s,%s)",
+        (reaction_id, post_id, user["key"], emoji, datetime.datetime.utcnow().isoformat())
+    )
 
     reactions = json.loads(post.get("reactions") or "{}")
-
-    if existing:
-        db.execute("DELETE FROM ratimbum_reactions WHERE id=%s", (existing["id"],))
-        users_list = reactions.get(emoji, [])
-        if user["key"] in users_list:
-            users_list.remove(user["key"])
-        if not users_list:
-            reactions.pop(emoji, None)
-        else:
-            reactions[emoji] = users_list
-    else:
-        reaction_id = str(uuid.uuid4())
-        db.execute(
-            "INSERT INTO ratimbum_reactions (id, post_id, user_key, emoji, created_at) VALUES (%s,%s,%s,%s,%s)",
-            (reaction_id, post_id, user["key"], emoji, datetime.datetime.utcnow().isoformat())
-        )
-        reactions.setdefault(emoji, [])
-        if user["key"] not in reactions[emoji]:
-            reactions[emoji].append(user["key"])
-
+    reactions.setdefault(emoji, [])
+    if user["key"] not in reactions[emoji]:
+        reactions[emoji].append(user["key"])
     db.execute("UPDATE ratimbum_posts SET reactions=%s WHERE id=%s",
                (json.dumps(reactions), post_id))
 
-    if not existing and post["author_key"] != user["key"]:
+    if post["author_key"] != user["key"]:
         _notify(db, title="🎉 Reação no RaTimBum",
                 message=f"{user['name']} reagiu com {emoji} ao seu post",
                 ntype="ratimbum_reaction", target_user_key=post["author_key"],
                 sender_key=user["key"], sender_name=user["name"],
                 reference_id=post_id, play_sound=False)
+
+    db.commit()
+    ws_emit("ratimbum_update_post", {"id": post_id, "reactions": reactions}, rooms=["all"])
+    return {"reactions": reactions}
+
+
+@app.delete("/api/ratimbum/posts/{post_id}/reactions")
+def remove_ratimbum_reaction(post_id: str, body: ReactRatimbumRequest,
+                              user=Depends(get_current_user), db=Depends(get_db)):
+    _check_ratimbum_rate_limit(user["key"])
+    post = db.execute("SELECT * FROM ratimbum_posts WHERE id=%s", (post_id,)).fetchone()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado.")
+
+    emoji = body.emoji.strip()
+    if not emoji:
+        raise HTTPException(status_code=400, detail="Emoji inválido.")
+
+    existing = db.execute(
+        "SELECT id FROM ratimbum_reactions WHERE post_id=%s AND user_key=%s AND emoji=%s",
+        (post_id, user["key"], emoji)
+    ).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Reação não encontrada.")
+
+    db.execute("DELETE FROM ratimbum_reactions WHERE id=%s", (existing["id"],))
+
+    reactions = json.loads(post.get("reactions") or "{}")
+    users_list = reactions.get(emoji, [])
+    if user["key"] in users_list:
+        users_list.remove(user["key"])
+    if not users_list:
+        reactions.pop(emoji, None)
+    else:
+        reactions[emoji] = users_list
+    db.execute("UPDATE ratimbum_posts SET reactions=%s WHERE id=%s",
+               (json.dumps(reactions), post_id))
 
     db.commit()
     ws_emit("ratimbum_update_post", {"id": post_id, "reactions": reactions}, rooms=["all"])
@@ -5193,6 +5286,120 @@ def search_ratimbum_users(q: str = "", user=Depends(get_current_user), db=Depend
             (f"%{safe_q}%", f"%{safe_q}%")
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/ratimbum/birthdays/next")
+def get_next_birthday(user=Depends(get_current_user), db=Depends(get_db)):
+    today = datetime.date.today()
+    rows = db.execute(
+        """SELECT id, nome, tipo, dia, mes, departamento, foto_url
+           FROM aniversarios WHERE ativo = true ORDER BY mes, dia""",
+    ).fetchall()
+    next_bday = None
+    for r in rows:
+        dia = int(r["dia"])
+        mes = int(r["mes"])
+        bday = datetime.date(today.year, mes, dia)
+        if bday < today:
+            bday = datetime.date(today.year + 1, mes, dia)
+        if next_bday is None or bday < next_bday["date"]:
+            next_bday = {"date": bday, "row": r}
+    if not next_bday:
+        return {"birthday": None}
+    b = next_bday["row"]
+    return {
+        "birthday": {
+            "id": b.get("id"),
+            "nome": _sanitize_text(b.get("nome", ""))[:80],
+            "departamento": _sanitize_text(b.get("departamento", ""))[:60],
+            "dia": int(b["dia"]),
+            "mes": int(b["mes"]),
+            "foto_url": b.get("foto_url") or None,
+            "days_until": (next_bday["date"] - today).days,
+        }
+    }
+
+
+@app.get("/api/ratimbum/birthdays/month")
+def get_month_birthdays(user=Depends(get_current_user), db=Depends(get_db)):
+    current_month = datetime.date.today().month
+    today = datetime.date.today()
+    rows = db.execute(
+        """SELECT id, nome, tipo, dia, mes, departamento, foto_url
+           FROM aniversarios WHERE ativo = true AND mes = %s ORDER BY dia ASC""",
+        (current_month,)
+    ).fetchall()
+    result = []
+    for r in rows:
+        dia = int(r["dia"])
+        bday = datetime.date(today.year, current_month, dia)
+        diff = (bday - today).days
+        if diff < 0:
+            tag = "past"
+        elif diff == 0:
+            tag = "today"
+        elif diff <= 7:
+            tag = "soon"
+        else:
+            tag = "month"
+        result.append({
+            "id": r.get("id"),
+            "nome": _sanitize_text(r.get("nome", ""))[:80],
+            "departamento": _sanitize_text(r.get("departamento", ""))[:60],
+            "dia": dia,
+            "mes": current_month,
+            "foto_url": r.get("foto_url") or None,
+            "tag": tag,
+        })
+    return {"birthdays": result}
+
+
+@app.get("/api/ratimbum/stats/month")
+def get_ratimbum_month_stats(user=Depends(get_current_user), db=Depends(get_db)):
+    first_day = datetime.date.today().replace(day=1).isoformat()
+    next_month = (datetime.date.today().replace(day=28) + datetime.timedelta(days=4)).replace(day=1).isoformat()
+    posts_count = db.execute(
+        "SELECT COUNT(*) FROM ratimbum_posts WHERE created_at >= %s AND created_at < %s",
+        (first_day, next_month)
+    ).fetchone()[0]
+    reactions_count = db.execute(
+        "SELECT COUNT(*) FROM ratimbum_reactions r JOIN ratimbum_posts p ON r.post_id=p.id WHERE p.created_at >= %s AND p.created_at < %s",
+        (first_day, next_month)
+    ).fetchone()[0]
+    current_month = datetime.date.today().month
+    birthdays_count = db.execute(
+        "SELECT COUNT(*) FROM aniversarios WHERE ativo=true AND mes=%s",
+        (current_month,)
+    ).fetchone()[0]
+    unique_authors = db.execute(
+        "SELECT COUNT(DISTINCT author_key) FROM ratimbum_posts WHERE created_at >= %s AND created_at < %s AND author_type='user'",
+        (first_day, next_month)
+    ).fetchone()[0]
+    total_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    engagement = round((unique_authors / max(total_users, 1)) * 100, 1)
+    return {
+        "messages": posts_count,
+        "reactions": reactions_count,
+        "birthdays": birthdays_count,
+        "engagement": engagement,
+    }
+
+
+@app.get("/api/ratimbum/stats/top")
+def get_ratimbum_top_contributors(user=Depends(get_current_user), db=Depends(get_db)):
+    first_day = datetime.date.today().replace(day=1).isoformat()
+    next_month = (datetime.date.today().replace(day=28) + datetime.timedelta(days=4)).replace(day=1).isoformat()
+    rows = db.execute(
+        """SELECT p.author_key, p.author_name, p.author_initials, p.author_color,
+                  p.author_photo_url, p.author_role, COUNT(*) as cnt
+           FROM ratimbum_posts p
+           WHERE p.created_at >= %s AND p.created_at < %s AND p.author_type='user'
+           GROUP BY p.author_key, p.author_name, p.author_initials, p.author_color,
+                    p.author_photo_url, p.author_role
+           ORDER BY cnt DESC LIMIT 3""",
+        (first_day, next_month)
+    ).fetchall()
+    return {"top": [dict(r) for r in rows]}
 
 
 # ── Job: Post automático de aniversário (chamado por scheduler externo ou manualmente) ──
