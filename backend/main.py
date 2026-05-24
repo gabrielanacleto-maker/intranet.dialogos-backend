@@ -4970,5 +4970,271 @@ def set_org_position(body: SetOrgPositionRequest, user=Depends(get_current_user)
     )
     return {"ok": True}
 
+# ── RA-TIM-BUM ──────────────────────────────────────────────────────────────────
+
+_ratimbum_limits = {}
+
+def _check_ratimbum_rate_limit(user_key: str):
+    now = time.time()
+    minute = int(now / 60)
+    key = f"{user_key}:{minute}"
+    count = _ratimbum_limits.get(key, 0)
+    if count >= 20:
+        raise HTTPException(status_code=429, detail="Limite de ações no RaTimBum excedido. Tente novamente em 1 minuto.")
+    _ratimbum_limits[key] = count + 1
+
+def _resolve_mentions(text: str, db):
+    mentioned = set()
+    for match in re.finditer(r'@([A-Za-z0-9_.-]+)', text or ''):
+        key = match.group(1).lower()
+        if key == 'todos':
+            mentioned.add('@todos')
+        else:
+            user = db.execute("SELECT key, name FROM users WHERE key=%s", (key,)).fetchone()
+            if user:
+                mentioned.add(user['key'])
+    return list(mentioned)
+
+
+@app.get("/api/ratimbum/posts")
+def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
+                       user=Depends(get_current_user), db=Depends(get_db)):
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
+    user_key = user["key"]
+
+    if filter == "self":
+        rows = db.execute(
+            """SELECT p.* FROM ratimbum_posts p
+               WHERE p.author_type = 'user'
+               ORDER BY p.created_at DESC LIMIT %s OFFSET %s""",
+            (limit, offset)
+        ).fetchall()
+    elif filter == "team":
+        manager_key = user.get("manager_key")
+        if manager_key:
+            team_keys = [r["key"] for r in
+                         db.execute("SELECT key FROM users WHERE manager_key=%s OR key=%s",
+                                    (user_key, user_key)).fetchall()]
+            if not team_keys:
+                team_keys = [user_key]
+        else:
+            team_keys = [user_key]
+        placeholders = ",".join("%s" for _ in team_keys)
+        rows = db.execute(
+            f"""SELECT p.* FROM ratimbum_posts p
+                WHERE p.author_key IN ({placeholders})
+                ORDER BY p.created_at DESC LIMIT %s OFFSET %s""",
+            team_keys + [limit, offset]
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM ratimbum_posts ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            (limit, offset)
+        ).fetchall()
+
+    total = db.execute("SELECT COUNT(*) FROM ratimbum_posts").fetchone()[0]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["reactions"] = json.loads(d.get("reactions") or "{}")
+        d["mentions"] = json.loads(d.get("mentions") or "[]")
+        result.append(d)
+    return {"posts": result, "total": total}
+
+
+@app.post("/api/ratimbum/posts")
+def create_ratimbum_post(body: CreateRatimbumPostRequest,
+                          user=Depends(get_current_user), db=Depends(get_db)):
+    _check_ratimbum_rate_limit(user["key"])
+    safe_text = _sanitize_text(body.text or "")
+    if not safe_text.strip():
+        raise HTTPException(status_code=400, detail="A mensagem não pode estar vazia.")
+
+    mentions = _resolve_mentions(safe_text, db)
+    post_id = str(uuid.uuid4())
+    safe_text_with_mentions = safe_text
+    for m in mentions:
+        if m == '@todos':
+            safe_text_with_mentions = safe_text_with_mentions.replace('@todos', '@todos')
+        else:
+            user_row = db.execute("SELECT name FROM users WHERE key=%s", (m,)).fetchone()
+            if user_row:
+                safe_text_with_mentions = safe_text_with_mentions.replace(f'@{m}', f'@{user_row["name"]}')
+
+    db.execute("""INSERT INTO ratimbum_posts
+        (id, author_key, author_name, author_initials, author_color, author_photo_url,
+         author_role, author_type, text, mentions, reactions, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (post_id, user["key"], user["name"], user["initials"], user["color"],
+         user.get("photo_url", ""), user.get("role", ""),
+         'user', safe_text_with_mentions,
+         json.dumps(mentions), '{}',
+         datetime.datetime.utcnow().isoformat()))
+
+    log_audit(db, user["key"], "ratimbum_post_create", user["key"],
+              f"Post criado no RaTimBum: {(safe_text or '')[:80]}")
+
+    if '@todos' in mentions:
+        _notify(db, title="🎉 RaTimBum",
+                message=f"{user['name']} mencionou @todos no RaTimBum: {(safe_text or '')[:80]}",
+                ntype="celebration", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=post_id, play_sound=False)
+
+    for mention_key in mentions:
+        if mention_key != '@todos' and mention_key != user["key"]:
+            _notify(db, title="👋 Você foi mencionado no RaTimBum",
+                    message=f"{user['name']} mencionou você no RaTimBum",
+                    ntype="mention", target_user_key=mention_key,
+                    sender_key=user["key"], sender_name=user["name"],
+                    reference_id=post_id, play_sound=True)
+
+    db.commit()
+    ws_emit("ratimbum_new_post", {
+        "id": post_id,
+        "author_key": user["key"],
+        "author_name": user["name"],
+        "author_initials": user["initials"],
+        "author_color": user["color"],
+        "author_photo_url": user.get("photo_url", ""),
+        "author_role": user.get("role", ""),
+        "author_type": "user",
+        "text": safe_text_with_mentions,
+        "mentions": mentions,
+        "reactions": {},
+        "created_at": datetime.datetime.utcnow().isoformat(),
+    }, rooms=["all"])
+    return {"ok": True, "id": post_id}
+
+
+@app.delete("/api/ratimbum/posts/{post_id}")
+def delete_ratimbum_post(post_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    post = db.execute("SELECT * FROM ratimbum_posts WHERE id=%s", (post_id,)).fetchone()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado.")
+    if post["author_type"] == "system":
+        raise HTTPException(status_code=403, detail="Posts do sistema não podem ser removidos.")
+    if post["author_key"] != user["key"] and not user.get("is_admin") and not user.get("is_admin_user"):
+        raise HTTPException(status_code=403, detail="Sem permissão para remover este post.")
+    db.execute("DELETE FROM ratimbum_reactions WHERE post_id=%s", (post_id,))
+    db.execute("DELETE FROM ratimbum_posts WHERE id=%s", (post_id,))
+    log_audit(db, user["key"], "ratimbum_post_delete", user["key"],
+              f"Post removido do RaTimBum: {(post.get('text') or '')[:80]}")
+    db.commit()
+    ws_emit("ratimbum_delete_post", {"id": post_id}, rooms=["all"])
+    return {"ok": True}
+
+
+@app.post("/api/ratimbum/posts/{post_id}/react")
+def react_ratimbum_post(post_id: str, body: ReactRatimbumRequest,
+                         user=Depends(get_current_user), db=Depends(get_db)):
+    _check_ratimbum_rate_limit(user["key"])
+    post = db.execute("SELECT * FROM ratimbum_posts WHERE id=%s", (post_id,)).fetchone()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado.")
+
+    emoji = body.emoji.strip()
+    if not emoji:
+        raise HTTPException(status_code=400, detail="Emoji inválido.")
+
+    existing = db.execute(
+        "SELECT id FROM ratimbum_reactions WHERE post_id=%s AND user_key=%s AND emoji=%s",
+        (post_id, user["key"], emoji)
+    ).fetchone()
+
+    reactions = json.loads(post.get("reactions") or "{}")
+
+    if existing:
+        db.execute("DELETE FROM ratimbum_reactions WHERE id=%s", (existing["id"],))
+        users_list = reactions.get(emoji, [])
+        if user["key"] in users_list:
+            users_list.remove(user["key"])
+        if not users_list:
+            reactions.pop(emoji, None)
+        else:
+            reactions[emoji] = users_list
+    else:
+        reaction_id = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO ratimbum_reactions (id, post_id, user_key, emoji, created_at) VALUES (%s,%s,%s,%s,%s)",
+            (reaction_id, post_id, user["key"], emoji, datetime.datetime.utcnow().isoformat())
+        )
+        reactions.setdefault(emoji, [])
+        if user["key"] not in reactions[emoji]:
+            reactions[emoji].append(user["key"])
+
+    db.execute("UPDATE ratimbum_posts SET reactions=%s WHERE id=%s",
+               (json.dumps(reactions), post_id))
+
+    if not existing and post["author_key"] != user["key"]:
+        _notify(db, title="🎉 Reação no RaTimBum",
+                message=f"{user['name']} reagiu com {emoji} ao seu post",
+                ntype="ratimbum_reaction", target_user_key=post["author_key"],
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=post_id, play_sound=False)
+
+    db.commit()
+    ws_emit("ratimbum_update_post", {"id": post_id, "reactions": reactions}, rooms=["all"])
+    return {"reactions": reactions}
+
+
+@app.get("/api/ratimbum/users")
+def search_ratimbum_users(q: str = "", user=Depends(get_current_user), db=Depends(get_db)):
+    if not q.strip():
+        rows = db.execute(
+            "SELECT key, name, initials, role, photo_url, color FROM users ORDER BY name LIMIT 20"
+        ).fetchall()
+    else:
+        safe_q = q.strip().lower()
+        rows = db.execute(
+            """SELECT key, name, initials, role, photo_url, color FROM users
+               WHERE LOWER(name) LIKE %s OR LOWER(key) LIKE %s
+               ORDER BY name LIMIT 20""",
+            (f"%{safe_q}%", f"%{safe_q}%")
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Job: Post automático de aniversário (chamado por scheduler externo ou manualmente) ──
+@app.post("/api/ratimbum/system-birthday-post")
+def system_birthday_post(body: dict, user=Depends(require_level(3)), db=Depends(get_db)):
+    user_key = (body or {}).get("user_key", "")
+    target = db.execute("SELECT * FROM users WHERE key=%s", (user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    text = f"Hoje é aniversário de @{target['name']}! 🎂 Parabenize-o(a)!"
+    post_id = str(uuid.uuid4())
+    db.execute("""INSERT INTO ratimbum_posts
+        (id, author_key, author_name, author_initials, author_color, author_photo_url,
+         author_role, author_type, text, mentions, reactions, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (post_id, 'system', 'Axis', 'AX', '#C9A84C', '', 'Sistema', 'system',
+         text, json.dumps(['@todos']), '{}', datetime.datetime.utcnow().isoformat()))
+    log_audit(db, 'system', 'ratimbum_system_birthday', user_key,
+              f"Post automático de aniversário para {target['name']}")
+    db.commit()
+    _notify(db, title="🎂 Aniversário!",
+            message=f"Hoje é aniversário de {target['name']}! 🎉",
+            ntype="celebration", audience="all",
+            sender_key='system', sender_name='Axis',
+            reference_id=post_id, play_sound=True)
+    ws_emit("ratimbum_new_post", {
+        "id": post_id,
+        "author_key": 'system',
+        "author_name": 'Axis',
+        "author_initials": 'AX',
+        "author_color": '#C9A84C',
+        "author_photo_url": '',
+        "author_role": 'Sistema',
+        "author_type": 'system',
+        "text": text,
+        "mentions": ['@todos'],
+        "reactions": {},
+        "created_at": datetime.datetime.utcnow().isoformat(),
+    }, rooms=["all"])
+    return {"ok": True, "id": post_id}
+
+
 # Expose a unified ASGI app (FastAPI + Socket.IO)
 app = socketio.ASGIApp(sio, app)

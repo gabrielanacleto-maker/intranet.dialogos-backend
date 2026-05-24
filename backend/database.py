@@ -413,6 +413,35 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_comm_created ON communications(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_comm ON communication_reads(communication_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user ON communication_reads(user_key)")
+        # ── RA-TIM-BUM ─────────────────────────────────────────────────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS ratimbum_posts (
+                id TEXT PRIMARY KEY,
+                author_key TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                author_initials TEXT NOT NULL,
+                author_color TEXT NOT NULL DEFAULT 'av-gold',
+                author_photo_url TEXT DEFAULT '',
+                author_role TEXT DEFAULT '',
+                author_type TEXT NOT NULL DEFAULT 'user' CHECK(author_type IN ('user','system')),
+                text TEXT NOT NULL,
+                mentions TEXT DEFAULT '[]',
+                reactions TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS ratimbum_reactions (
+                id TEXT PRIMARY KEY,
+                post_id TEXT NOT NULL REFERENCES ratimbum_posts(id),
+                user_key TEXT NOT NULL,
+                emoji TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(post_id, user_key, emoji)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_created ON ratimbum_posts(created_at DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_reactions_post ON ratimbum_reactions(post_id)")
         conn.commit()
         print("✅ Banco de dados inicializado.")
 

@@ -219,3 +219,11 @@ class AtualizarComunicadoRequest(BaseModel):
     target_audience: Optional[str] = None
     priority: Optional[str] = None
     is_draft: Optional[bool] = None
+
+# ── Ra-Tim-Bum ──────────────────────────────────────────────────────────────────
+class CreateRatimbumPostRequest(BaseModel):
+    text: str
+    filter: str = "all"
+
+class ReactRatimbumRequest(BaseModel):
+    emoji: str
