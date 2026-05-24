@@ -1510,8 +1510,11 @@ def create_colleague_feedback(body: dict, user=Depends(get_current_user), db=Dep
         (fid, target_key, user["key"], text, "{}", now)
     )
     log_audit(db, user["key"], "colleague_feedback_create", target_key, f"Feedback de {user['name']}")
+    _auto_concluir_feedback(db, user)
+
     db.commit()
     return {"ok": True, "id": fid}
+
 
 @app.put("/api/colleague-feedback/{feedback_id}")
 def update_colleague_feedback(feedback_id: str, body: dict, user=Depends(get_current_user), db=Depends(get_db)):
@@ -3192,6 +3195,39 @@ def _auto_progress_tarefas(db, user_key):
 
         ev = "objective_completed" if status == "concluido" else "objective_updated"
         ws_emit_to_user(user_key, ev, {"id": obj["id"], "user_key": user_key, "status": status, "progresso": novo, "nome": obj["nome"]})
+
+def _auto_concluir_feedback(db, user):
+    hoje = datetime.datetime.utcnow().date().isoformat()
+    agora = datetime.datetime.utcnow().isoformat()
+    uk = user["key"]
+    obj = db.execute(
+        "SELECT * FROM objetivos_def WHERE nome ILIKE %s AND ativo=1",
+        ("%feedback%",)
+    ).fetchone()
+    if not obj:
+        return False
+    prog = db.execute(
+        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+        (obj["id"], uk)
+    ).fetchone()
+    if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje:
+        return False
+    if prog:
+        db.execute(
+            "UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
+            (obj["meta_valor"], agora, prog["id"])
+        )
+    else:
+        pid = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (pid, obj["id"], uk, obj["meta_valor"], "concluido", hoje, agora, agora)
+        )
+    _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Feedback dado: {obj['nome']}", notify=False)
+    _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
+    ws_emit_to_user(uk, "objective_completed",
+                    {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"], "nome": obj["nome"]})
+    return obj["nome"]
 
 def _auto_concluir_login(db, user):
     hoje = datetime.datetime.utcnow().date()
