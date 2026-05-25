@@ -5017,12 +5017,18 @@ def _build_post_ws_payload(post_id, text, mentions, user, author_type="user"):
         "created_at": datetime.datetime.utcnow().isoformat(),
     }
 
-def _has_parent_id_column(db):
-    try:
-        db.execute("SELECT parent_id FROM ratimbum_posts LIMIT 1")
-        return True
-    except Exception:
-        return False
+_HAS_PARENT_COLUMN = None
+
+def _check_parent_column(db):
+    global _HAS_PARENT_COLUMN
+    if _HAS_PARENT_COLUMN is None:
+        try:
+            db.execute("SELECT parent_id FROM ratimbum_posts LIMIT 0")
+            _HAS_PARENT_COLUMN = True
+        except Exception:
+            db.rollback()
+            _HAS_PARENT_COLUMN = False
+    return _HAS_PARENT_COLUMN
 
 
 @app.get("/api/ratimbum/posts")
@@ -5031,14 +5037,11 @@ def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
     limit = min(max(limit, 1), 100)
     offset = max(offset, 0)
     user_key = user["key"]
-    has_parent = _has_parent_id_column(db)
-    parent_clause = "AND p.parent_id IS NULL" if has_parent else ""
-    parent_where = "WHERE parent_id IS NULL" if has_parent else ""
 
     if filter == "self":
         rows = db.execute(
-            f"""SELECT p.* FROM ratimbum_posts p
-               WHERE p.author_key = %s {parent_clause}
+            """SELECT p.* FROM ratimbum_posts p
+               WHERE p.author_key = %s
                ORDER BY p.created_at DESC LIMIT %s OFFSET %s""",
             (user_key, limit, offset)
         ).fetchall()
@@ -5054,36 +5057,28 @@ def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
         placeholders = ",".join("%s" for _ in team_keys)
         rows = db.execute(
             f"""SELECT p.* FROM ratimbum_posts p
-                WHERE p.author_key IN ({placeholders}) {parent_clause}
+                WHERE p.author_key IN ({placeholders})
                 ORDER BY p.created_at DESC LIMIT %s OFFSET %s""",
             team_keys + [limit, offset]
         ).fetchall()
     else:
         rows = db.execute(
-            f"SELECT * FROM ratimbum_posts {parent_where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            "SELECT * FROM ratimbum_posts ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (limit, offset)
         ).fetchall()
 
-    total_q = f"SELECT COUNT(*) FROM ratimbum_posts {parent_where}"
-    total = db.execute(total_q).fetchone()[0]
+    total = db.execute("SELECT COUNT(*) FROM ratimbum_posts").fetchone()[0]
     result = []
     for r in rows:
         d = _format_ratimbum_post(r)
-        if has_parent:
-            post_id = d["id"]
-            reply_count = db.execute(
-                "SELECT COUNT(*) FROM ratimbum_posts WHERE parent_id=%s", (post_id,)
-            ).fetchone()[0]
-            d["reply_count"] = reply_count
-        else:
-            d["reply_count"] = 0
+        d["reply_count"] = 0
         result.append(d)
     return {"posts": result, "total": total}
 
 
 @app.get("/api/ratimbum/posts/{post_id}/replies")
 def get_ratimbum_replies(post_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    if not _has_parent_id_column(db):
+    if not _check_parent_column(db):
         return {"replies": []}
     parent = db.execute("SELECT id FROM ratimbum_posts WHERE id=%s", (post_id,)).fetchone()
     if not parent:
@@ -5151,7 +5146,7 @@ def create_ratimbum_post(body: CreateRatimbumPostRequest,
 def reply_ratimbum_post(post_id: str, body: CreateRatimbumReplyRequest,
                          user=Depends(get_current_user), db=Depends(get_db)):
     _check_ratimbum_rate_limit(user["key"])
-    if not _has_parent_id_column(db):
+    if not _check_parent_column(db):
         raise HTTPException(status_code=400, detail="Respostas ainda não disponíveis. Atualize o banco de dados.")
     parent = db.execute("SELECT id FROM ratimbum_posts WHERE id=%s", (post_id,)).fetchone()
     if not parent:
@@ -5199,7 +5194,7 @@ def delete_ratimbum_post(post_id: str, user=Depends(get_current_user), db=Depend
     if post["author_key"] != user["key"] and not user.get("is_admin") and not user.get("is_admin_user"):
         raise HTTPException(status_code=403, detail="Sem permissão para remover este post.")
     db.execute("DELETE FROM ratimbum_reactions WHERE post_id=%s", (post_id,))
-    if _has_parent_id_column(db):
+    if _check_parent_column(db):
         db.execute("DELETE FROM ratimbum_posts WHERE parent_id=%s", (post_id,))
     db.execute("DELETE FROM ratimbum_posts WHERE id=%s", (post_id,))
     log_audit(db, user["key"], "ratimbum_post_delete", user["key"],
