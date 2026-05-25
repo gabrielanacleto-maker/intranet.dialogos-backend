@@ -2892,6 +2892,88 @@ def delete_pop_file(file_id: str, user=Depends(get_current_user), db=Depends(get
     db.commit()
     return {"ok": True}
 
+@app.post("/api/pops-files/{file_id}/replace")
+def replace_pop_file(
+    file_id: str,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+    db=Depends(get_db)
+):
+    f = db.execute("SELECT * FROM pop_files WHERE id=%s", (file_id,)).fetchone()
+    if not f:
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    if f["uploaded_by"] != user["name"] and user["access_level"] < 2:
+        raise HTTPException(status_code=403, detail="Você só pode substituir seus próprios arquivos")
+    _check_upload_rate_limit(user["key"])
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Arquivo sem nome")
+    ext = Path(file.filename).suffix.lower()
+    if _is_executable(ext):
+        raise HTTPException(status_code=400, detail="Arquivos executáveis não são permitidos")
+    if ext not in ALLOWED_POP_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Extensão {ext} não permitida para POPs")
+    if file.size and file.size > MAX_POP_FILE_SIZE:
+        raise HTTPException(status_code=400, detail=f"Arquivo muito grande (máx 3MB)")
+
+    try:
+        unique_name = f"{uuid.uuid4()}{ext}"
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="dialogos/pops",
+            public_id=unique_name.replace(ext, ""),
+            resource_type="auto"
+        )
+        url = result["secure_url"]
+        db.execute("""UPDATE pop_files SET name=%s, url=%s, size=%s, mime_type=%s, uploaded_by=%s, created_at=%s WHERE id=%s""",
+            (file.filename, url, file.size or 0, file.content_type or "",
+             user["name"], datetime.datetime.utcnow().isoformat(), file_id)
+        )
+        _notify(db, title="📄 POP substituído",
+                message=f"{user['name']} substituiu {file.filename} em POPs",
+                ntype="system", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=file_id, play_sound=False)
+        db.commit()
+        return {"ok": True, "url": url, "id": file_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/pops-files/{file_id}/content")
+def update_pop_file_content(file_id: str, body: dict, user=Depends(get_current_user), db=Depends(get_db)):
+    f = db.execute("SELECT * FROM pop_files WHERE id=%s", (file_id,)).fetchone()
+    if not f:
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    if f["uploaded_by"] != user["name"] and user["access_level"] < 2:
+        raise HTTPException(status_code=403, detail="Você só pode editar seus próprios arquivos")
+
+    content = body.get("content", "")
+    ext = Path(f["name"]).suffix.lower()
+    if ext not in {".txt", ".csv", ".xml", ".json", ".md", ".log", ".yml", ".yaml", ".ini", ".cfg", ".env", ".bat"}:
+        raise HTTPException(status_code=400, detail="Este tipo de arquivo não pode ser editado como texto")
+
+    try:
+        import io
+        content_bytes = content.encode("utf-8")
+        file_like = io.BytesIO(content_bytes)
+
+        unique_name = f"{uuid.uuid4()}{ext}"
+        result = cloudinary.uploader.upload(
+            file_like,
+            folder="dialogos/pops",
+            public_id=unique_name.replace(ext, ""),
+            resource_type="raw"
+        )
+        url = result["secure_url"]
+        db.execute("""UPDATE pop_files SET url=%s, size=%s, mime_type=%s, uploaded_by=%s, created_at=%s WHERE id=%s""",
+            (url, len(content_bytes), "text/plain",
+             user["name"], datetime.datetime.utcnow().isoformat(), file_id)
+        )
+        db.commit()
+        return {"ok": True, "url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ── CALENDAR EVENTS ───────────────────────────────────────────────────────────
 
 @app.get("/api/calendar")
