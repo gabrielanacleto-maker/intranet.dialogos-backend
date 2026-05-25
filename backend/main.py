@@ -2380,6 +2380,8 @@ def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user
     log_action(db, user["key"], user["key"], "Registro de Humor",
                f"valor_humor={body.valor_humor or mood_key} IP={ip}")
 
+    _auto_concluir_humor(db, user)
+
     return {"ok": True, "valor_humor": body.valor_humor or None}
 
 @app.get("/api/mood/history")
@@ -3332,6 +3334,40 @@ def _auto_concluir_feedback(db, user):
         )
     _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Feedback dado: {obj['nome']}", notify=False)
     _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
+    ws_emit_to_user(uk, "objective_completed",
+                    {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"], "nome": obj["nome"]})
+    return obj["nome"]
+
+def _auto_concluir_humor(db, user):
+    hoje = datetime.datetime.utcnow().date().isoformat()
+    agora = datetime.datetime.utcnow().isoformat()
+    uk = user["key"]
+    obj = db.execute(
+        "SELECT * FROM objetivos_def WHERE nome ILIKE %s AND ativo=1",
+        ("%humor%",)
+    ).fetchone()
+    if not obj:
+        return False
+    prog = db.execute(
+        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+        (obj["id"], uk)
+    ).fetchone()
+    if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje:
+        return False
+    if prog:
+        db.execute(
+            "UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
+            (obj["meta_valor"], agora, prog["id"])
+        )
+    else:
+        pid = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (pid, obj["id"], uk, obj["meta_valor"], "concluido", hoje, agora, agora)
+        )
+    _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Humor registrado: {obj['nome']}", notify=False)
+    _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
+    db.commit()
     ws_emit_to_user(uk, "objective_completed",
                     {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"], "nome": obj["nome"]})
     return obj["nome"]
