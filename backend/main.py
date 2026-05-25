@@ -5234,8 +5234,9 @@ def create_ratimbum_post(body: CreateRatimbumPostRequest,
                     reference_id=post_id, play_sound=True)
 
     db.commit()
-    ws_emit("ratimbum_new_post", _build_post_ws_payload(post_id, safe_text_with_mentions, mentions, user, is_celebration=is_celebration), rooms=["all"])
-    return {"ok": True, "id": post_id}
+    post_data = _build_post_ws_payload(post_id, safe_text_with_mentions, mentions, user, is_celebration=is_celebration)
+    ws_emit("ratimbum_new_post", post_data, rooms=["all"])
+    return {"ok": True, "id": post_id, "post": post_data}
 
 
 @app.post("/api/ratimbum/posts/{post_id}/reply")
