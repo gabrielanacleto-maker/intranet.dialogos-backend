@@ -223,7 +223,7 @@ def init_db():
                 (str(uuid.uuid4()), 'Contratos & Relatórios', '📑', 'diamante', ''),
                 (str(uuid.uuid4()), 'Tabela de Preços', '💲', 'dourado', ''),
                 (str(uuid.uuid4()), 'Organograma', '🏢', 'all', ''),
-                (str(uuid.uuid4()), 'Recursos Humanos', '👥', 'rh', ''),
+                (str(uuid.uuid4()), 'Recursos Humanos', '/Recursos Humanos.png', 'rh', ''),
                 (str(uuid.uuid4()), 'Treinamentos', '🎓', 'all', ''),
                 (str(uuid.uuid4()), 'Gestão de Acessos', '🔐', 'diamante', ''),
             ]
