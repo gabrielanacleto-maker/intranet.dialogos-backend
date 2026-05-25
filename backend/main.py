@@ -4995,13 +4995,28 @@ def _resolve_mentions(text: str, db):
                 mentioned.add(user['key'])
     return list(mentioned)
 
+CELEBRATION_KEYWORDS = [
+    'parabéns', 'parabens', 'feliz aniversário', 'feliz aniversario',
+    'muitas felicidades', 'congratulações', 'congratulacoes',
+    'te parabenizo', 'quero parabenizar',
+]
+
+def _is_celebration(text: str) -> int:
+    t = text.lower().strip()
+    for kw in CELEBRATION_KEYWORDS:
+        if kw in t:
+            return 1
+    return 0
+
 def _format_ratimbum_post(row: dict):
     d = dict(row)
     d["reactions"] = json.loads(d.get("reactions") or "{}")
     d["mentions"] = json.loads(d.get("mentions") or "[]")
+    if "is_celebration" not in d:
+        d["is_celebration"] = 1
     return d
 
-def _build_post_ws_payload(post_id, text, mentions, user, author_type="user"):
+def _build_post_ws_payload(post_id, text, mentions, user, author_type="user", is_celebration=1):
     return {
         "id": post_id,
         "author_key": user["key"] if author_type == "user" else "system",
@@ -5014,6 +5029,7 @@ def _build_post_ws_payload(post_id, text, mentions, user, author_type="user"):
         "text": text,
         "mentions": mentions,
         "reactions": {},
+        "is_celebration": is_celebration,
         "created_at": datetime.datetime.utcnow().isoformat(),
     }
 
@@ -5099,6 +5115,7 @@ def create_ratimbum_post(body: CreateRatimbumPostRequest,
         raise HTTPException(status_code=400, detail="A mensagem não pode estar vazia.")
 
     mentions = _resolve_mentions(safe_text, db)
+    is_celebration = _is_celebration(safe_text)
     post_id = str(uuid.uuid4())
     safe_text_with_mentions = safe_text
     for m in mentions:
@@ -5111,13 +5128,14 @@ def create_ratimbum_post(body: CreateRatimbumPostRequest,
 
     db.execute("""INSERT INTO ratimbum_posts
         (id, author_key, author_name, author_initials, author_color, author_photo_url,
-         author_role, author_type, text, mentions, reactions, created_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+         author_role, author_type, text, mentions, reactions, created_at, is_celebration)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (post_id, user["key"], user["name"], user["initials"], user["color"],
          user.get("photo_url", ""), user.get("role", ""),
          'user', safe_text_with_mentions,
          json.dumps(mentions), '{}',
-         datetime.datetime.utcnow().isoformat()))
+         datetime.datetime.utcnow().isoformat(),
+         is_celebration))
 
     log_audit(db, user["key"], "ratimbum_post_create", user["key"],
               f"Post criado no RaTimBum: {(safe_text or '')[:80]}")
@@ -5138,7 +5156,7 @@ def create_ratimbum_post(body: CreateRatimbumPostRequest,
                     reference_id=post_id, play_sound=True)
 
     db.commit()
-    ws_emit("ratimbum_new_post", _build_post_ws_payload(post_id, safe_text_with_mentions, mentions, user), rooms=["all"])
+    ws_emit("ratimbum_new_post", _build_post_ws_payload(post_id, safe_text_with_mentions, mentions, user, is_celebration=is_celebration), rooms=["all"])
     return {"ok": True, "id": post_id}
 
 
@@ -5156,6 +5174,7 @@ def reply_ratimbum_post(post_id: str, body: CreateRatimbumReplyRequest,
         raise HTTPException(status_code=400, detail="A mensagem não pode estar vazia.")
 
     mentions = _resolve_mentions(safe_text, db)
+    is_celebration = _is_celebration(safe_text)
     reply_id = str(uuid.uuid4())
     safe_text_with_mentions = safe_text
     for m in mentions:
@@ -5168,17 +5187,18 @@ def reply_ratimbum_post(post_id: str, body: CreateRatimbumReplyRequest,
 
     db.execute("""INSERT INTO ratimbum_posts
         (id, author_key, author_name, author_initials, author_color, author_photo_url,
-         author_role, author_type, text, mentions, reactions, created_at, parent_id)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+         author_role, author_type, text, mentions, reactions, created_at, parent_id, is_celebration)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (reply_id, user["key"], user["name"], user["initials"], user["color"],
          user.get("photo_url", ""), user.get("role", ""),
          'user', safe_text_with_mentions,
          json.dumps(mentions), '{}',
-         datetime.datetime.utcnow().isoformat(), post_id))
+         datetime.datetime.utcnow().isoformat(), post_id, is_celebration))
 
     db.commit()
     ws_emit("ratimbum_new_reply", {
-        "reply": _build_post_ws_payload(reply_id, safe_text_with_mentions, mentions, user),
+        "reply": _build_post_ws_payload(reply_id, safe_text_with_mentions, mentions, user,
+                  is_celebration=_is_celebration(safe_text)),
         "parent_id": post_id,
     }, rooms=["all"])
     return {"ok": True, "id": reply_id}
@@ -5427,10 +5447,10 @@ def system_birthday_post(body: dict, user=Depends(require_level(3)), db=Depends(
     post_id = str(uuid.uuid4())
     db.execute("""INSERT INTO ratimbum_posts
         (id, author_key, author_name, author_initials, author_color, author_photo_url,
-         author_role, author_type, text, mentions, reactions, created_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+         author_role, author_type, text, mentions, reactions, created_at, is_celebration)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (post_id, 'system', 'Axis', 'AX', '#C9A84C', '', 'Sistema', 'system',
-         text, json.dumps(['@todos']), '{}', datetime.datetime.utcnow().isoformat()))
+         text, json.dumps(['@todos']), '{}', datetime.datetime.utcnow().isoformat(), 1))
     log_audit(db, 'system', 'ratimbum_system_birthday', user_key,
               f"Post automático de aniversário para {target['name']}")
     db.commit()
@@ -5451,6 +5471,7 @@ def system_birthday_post(body: dict, user=Depends(require_level(3)), db=Depends(
         "text": text,
         "mentions": ['@todos'],
         "reactions": {},
+        "is_celebration": 1,
         "created_at": datetime.datetime.utcnow().isoformat(),
     }, rooms=["all"])
     return {"ok": True, "id": post_id}
