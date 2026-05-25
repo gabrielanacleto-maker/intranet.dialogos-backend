@@ -2739,10 +2739,10 @@ def get_price_procedures(doctor_id: str, user=Depends(get_current_user), db=Depe
 def create_price_procedure(body: PriceProcedureRequest, user=Depends(require_level(1)), db=Depends(get_db)):
     proc_id = str(uuid.uuid4())
     db.execute("""INSERT INTO price_procedures
-        (id, doctor_id, name, value_cash, value_card_pix, value_bradesco, value_brv, value_prefeitura, position_order, created_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (id, doctor_id, name, value_cash, value_card_pix, value_bradesco, position_order, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
         (proc_id, body.doctor_id, body.name, body.value_cash or 0, body.value_card_pix or 0,
-        body.value_bradesco or 0, body.value_brv or 0, body.value_prefeitura or 0,
+        body.value_bradesco or 0,
         body.position_order, datetime.datetime.utcnow().isoformat())
     )
     db.commit()
@@ -2751,9 +2751,9 @@ def create_price_procedure(body: PriceProcedureRequest, user=Depends(require_lev
 @app.put("/api/price-procedures/{proc_id}")
 def update_price_procedure(proc_id: str, body: PriceProcedureRequest, user=Depends(require_level(1)), db=Depends(get_db)):
     db.execute("""UPDATE price_procedures SET name=%s, value_cash=%s, value_card_pix=%s, value_bradesco=%s,
-        value_brv=%s, value_prefeitura=%s, position_order=%s WHERE id=%s""",
+        position_order=%s WHERE id=%s""",
         (body.name, body.value_cash or 0, body.value_card_pix or 0, body.value_bradesco or 0,
-        body.value_brv or 0, body.value_prefeitura or 0, body.position_order, proc_id)
+        body.position_order, proc_id)
     )
     db.commit()
     return {"ok": True}

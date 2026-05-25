@@ -140,8 +140,6 @@ class PriceProcedureRequest(BaseModel):
     value_cash: Optional[float] = 0
     value_card_pix: Optional[float] = 0
     value_bradesco: Optional[float] = 0
-    value_brv: Optional[float] = 0
-    value_prefeitura: Optional[float] = 0
     position_order: Optional[int] = 0
 
 class CalendarEventRequest(BaseModel):

@@ -11,8 +11,7 @@ def proc(name, cash, card_pix):
         "value_cash": float(cash) if cash is not None else 0.0,
         "value_card_pix": float(card_pix) if card_pix is not None else 0.0,
         "value_bradesco": 0.0,
-        "value_brv": 0.0,
-        "value_prefeitura": 0.0,
+
     }
 
 
@@ -293,8 +292,8 @@ def main():
         for idx_p, p in enumerate(doc["procedures"]):
             cur.execute(
                 """INSERT INTO price_procedures
-                   (id, doctor_id, name, value_cash, value_card_pix, value_bradesco, value_brv, value_prefeitura, position_order)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                   (id, doctor_id, name, value_cash, value_card_pix, value_bradesco, position_order)
+                   VALUES (?,?,?,?,?,?,?)""",
                 (
                     str(uuid.uuid4()),
                     doctor_id,
@@ -302,8 +301,6 @@ def main():
                     p["value_cash"],
                     p["value_card_pix"],
                     p["value_bradesco"],
-                    p["value_brv"],
-                    p["value_prefeitura"],
                     idx_p,
                 ),
             )
