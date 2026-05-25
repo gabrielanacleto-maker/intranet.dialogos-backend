@@ -235,16 +235,17 @@ def init_db():
 
         # Seed POPs modules if POPs Gerais folder exists and no modules exist
         c.execute("SELECT id FROM folders WHERE name='POPs Gerais'")
-        pops_folder = c.fetchone()
-        if pops_folder:
-            c.execute("SELECT COUNT(*) FROM pop_modules WHERE folder_id=%s", (pops_folder["id"],))
+        row = c.fetchone()
+        if row:
+            pops_folder_id = row[0]
+            c.execute("SELECT COUNT(*) FROM pop_modules WHERE folder_id=%s", (pops_folder_id,))
             if c.fetchone()[0] == 0:
                 pop_modules = [
-                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Recepção', '/Recepção.png', 0),
-                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Financeiro', '/Financeiro.png', 1),
-                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Serviços Gerais', '/Limpeza.png', 2),
-                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Marketing', '/Marketing.png', 3),
-                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Comercial', '/Comercial.png', 4),
+                    (str(uuid.uuid4()), pops_folder_id, 'Módulo Recepção', '/Recepção.png', 0),
+                    (str(uuid.uuid4()), pops_folder_id, 'Módulo Financeiro', '/Financeiro.png', 1),
+                    (str(uuid.uuid4()), pops_folder_id, 'Módulo Serviços Gerais', '/Limpeza.png', 2),
+                    (str(uuid.uuid4()), pops_folder_id, 'Módulo Marketing', '/Marketing.png', 3),
+                    (str(uuid.uuid4()), pops_folder_id, 'Módulo Comercial', '/Comercial.png', 4),
                 ]
                 c.executemany(
                     "INSERT INTO pop_modules (id, folder_id, name, icon, position_order, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
