@@ -226,7 +226,7 @@ else:
         "http://localhost:3000",
         "https://intranet-dialogos.vercel.app",
         "https://intranet-dialogos-backend.onrender.com",
-        "axis-dialogos.vercel.app"
+        "https://axis-dialogos.vercel.app"
     ]
 
 app.add_middleware(
@@ -4038,10 +4038,11 @@ def criar_tarefa(body: CriarTarefaRequest, user=Depends(get_current_user), db=De
         if not dest:
             continue
         tid = str(uuid.uuid4())
+        task_tipo = "gestor" if dest_key != user["key"] else "colaborador"
         db.execute(
             """INSERT INTO tarefas (id, titulo, descricao, tipo, criado_por, destinatario_id, prazo, concluida, created_at, updated_at)
                VALUES (%s,%s,%s,%s,%s,%s,%s,0,%s,%s)""",
-            (tid, safe_titulo, safe_descricao, "gestor", user["key"], dest_key, prazo, now, now)
+            (tid, safe_titulo, safe_descricao, task_tipo, user["key"], dest_key, prazo, now, now)
         )
         created.append(tid)
         if dest_key != user["key"]:
@@ -4302,7 +4303,7 @@ def criar_nova_tarefa(
         destinatario_id = body.atribuir_para
         delegado_por = user["key"]
 
-    tipo = "gestor"
+    tipo = "gestor" if destinatario_id != user["key"] else "colaborador"
 
     prioridade = body.prioridade if body.prioridade in ("alta", "media", "baixa") else "media"
     recorrencia = body.recorrencia if body.recorrencia in ("diaria", "semanal", "mensal") else "nenhuma"
