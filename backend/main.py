@@ -258,6 +258,26 @@ def _extract_socket_token(environ, auth):
         return qs["token"][0]
     return None
 
+_presence = {}
+_PRESENCE_TIMEOUT = 60
+
+def _presence_user_list():
+    return sorted(_presence.values(), key=lambda u: u["name"].lower())
+
+def _emit_presence():
+    sio.emit("presence_update", {
+        "online_count": len(_presence),
+        "users": _presence_user_list(),
+    }, room="all")
+
+def _cleanup_stale_presence():
+    now = time.time()
+    stale = [k for k, v in list(_presence.items()) if now - v["last_ping"] > _PRESENCE_TIMEOUT]
+    for k in stale:
+        _presence.pop(k, None)
+    if stale:
+        _emit_presence()
+
 @sio.event
 def connect(sid, environ, auth=None):
     token = _extract_socket_token(environ, auth)
@@ -271,12 +291,36 @@ def connect(sid, environ, auth=None):
         if not user_row:
             raise ConnectionRefusedError("unauthorized")
         user = dict(user_row)
-    sio.save_session(sid, {"user_key": user["key"], "dept": user.get("dept", "")})
+    sio.save_session(sid, {
+        "user_key": user["key"],
+        "dept": user.get("dept", ""),
+        "name": user["name"],
+        "initials": user.get("initials", user["name"][0] if user["name"] else "?"),
+        "color": user.get("color", "#C9A84C"),
+        "photo_url": user.get("photo_url", ""),
+        "role": user.get("role", ""),
+    })
     sio.enter_room(sid, "all")
     sio.enter_room(sid, f"user:{user['key']}")
     if user.get("dept"):
         sio.enter_room(sid, f"dept:{user['dept']}")
-    sio.emit("user_online", {"user_key": user["key"]}, room="all")
+    user_key = user["key"]
+    now = time.time()
+    if user_key in _presence:
+        _presence[user_key]["count"] += 1
+        _presence[user_key]["last_ping"] = now
+    else:
+        _presence[user_key] = {
+            "user_key": user_key,
+            "name": user["name"],
+            "initials": user.get("initials", user["name"][0] if user["name"] else "?"),
+            "color": user.get("color", "#C9A84C"),
+            "photo_url": user.get("photo_url", ""),
+            "role": user.get("role", ""),
+            "last_ping": now,
+            "count": 1,
+        }
+    _emit_presence()
 
 @sio.event
 def disconnect(sid):
@@ -285,7 +329,25 @@ def disconnect(sid):
     except Exception:
         session = None
     if session and session.get("user_key"):
-        sio.emit("user_offline", {"user_key": session["user_key"]}, room="all")
+        ukey = session["user_key"]
+        entry = _presence.get(ukey)
+        if entry:
+            entry["count"] -= 1
+            if entry["count"] <= 0:
+                _presence.pop(ukey, None)
+        _emit_presence()
+
+@sio.event
+def ping(sid):
+    try:
+        session = sio.get_session(sid)
+    except Exception:
+        session = None
+    if session and session.get("user_key"):
+        ukey = session["user_key"]
+        if ukey in _presence:
+            _presence[ukey]["last_ping"] = time.time()
+    _cleanup_stale_presence()
 
 @sio.event
 def join(sid, data):
@@ -5046,6 +5108,18 @@ def _check_parent_column(db):
             _HAS_PARENT_COLUMN = False
     return _HAS_PARENT_COLUMN
 
+_HAS_CELEBRATION_COLUMN = None
+
+def _check_celebration_column(db):
+    global _HAS_CELEBRATION_COLUMN
+    if _HAS_CELEBRATION_COLUMN is None:
+        try:
+            db.execute("SELECT is_celebration FROM ratimbum_posts LIMIT 0")
+            _HAS_CELEBRATION_COLUMN = True
+        except Exception:
+            db.rollback()
+            _HAS_CELEBRATION_COLUMN = False
+    return _HAS_CELEBRATION_COLUMN
 
 @app.get("/api/ratimbum/posts")
 def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
@@ -5126,16 +5200,20 @@ def create_ratimbum_post(body: CreateRatimbumPostRequest,
             if user_row:
                 safe_text_with_mentions = safe_text_with_mentions.replace(f'@{m}', f'@{user_row["name"]}')
 
-    db.execute("""INSERT INTO ratimbum_posts
-        (id, author_key, author_name, author_initials, author_color, author_photo_url,
-         author_role, author_type, text, mentions, reactions, created_at, is_celebration)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (post_id, user["key"], user["name"], user["initials"], user["color"],
-         user.get("photo_url", ""), user.get("role", ""),
-         'user', safe_text_with_mentions,
-         json.dumps(mentions), '{}',
-         datetime.datetime.utcnow().isoformat(),
-         is_celebration))
+    has_cele = _check_celebration_column(db)
+    extra_col = ", is_celebration" if has_cele else ""
+    extra_ph = ", %s" if has_cele else ""
+    base_cols = ("id, author_key, author_name, author_initials, author_color, author_photo_url, "
+                 "author_role, author_type, text, mentions, reactions, created_at")
+    base_phs = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s"
+    vals = [post_id, user["key"], user["name"], user["initials"], user["color"],
+            user.get("photo_url", ""), user.get("role", ""),
+            'user', safe_text_with_mentions,
+            json.dumps(mentions), '{}',
+            datetime.datetime.utcnow().isoformat()]
+    if has_cele:
+        vals.append(is_celebration)
+    db.execute(f"INSERT INTO ratimbum_posts ({base_cols}{extra_col}) VALUES ({base_phs}{extra_ph})", vals)
 
     log_audit(db, user["key"], "ratimbum_post_create", user["key"],
               f"Post criado no RaTimBum: {(safe_text or '')[:80]}")
@@ -5185,15 +5263,20 @@ def reply_ratimbum_post(post_id: str, body: CreateRatimbumReplyRequest,
             if user_row:
                 safe_text_with_mentions = safe_text_with_mentions.replace(f'@{m}', f'@{user_row["name"]}')
 
-    db.execute("""INSERT INTO ratimbum_posts
-        (id, author_key, author_name, author_initials, author_color, author_photo_url,
-         author_role, author_type, text, mentions, reactions, created_at, parent_id, is_celebration)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (reply_id, user["key"], user["name"], user["initials"], user["color"],
-         user.get("photo_url", ""), user.get("role", ""),
-         'user', safe_text_with_mentions,
-         json.dumps(mentions), '{}',
-         datetime.datetime.utcnow().isoformat(), post_id, is_celebration))
+    has_cele = _check_celebration_column(db)
+    extra_col = ", is_celebration" if has_cele else ""
+    extra_ph = ", %s" if has_cele else ""
+    base_cols = ("id, author_key, author_name, author_initials, author_color, author_photo_url, "
+                 "author_role, author_type, text, mentions, reactions, created_at, parent_id")
+    base_phs = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s"
+    vals = [reply_id, user["key"], user["name"], user["initials"], user["color"],
+            user.get("photo_url", ""), user.get("role", ""),
+            'user', safe_text_with_mentions,
+            json.dumps(mentions), '{}',
+            datetime.datetime.utcnow().isoformat(), post_id]
+    if has_cele:
+        vals.append(is_celebration)
+    db.execute(f"INSERT INTO ratimbum_posts ({base_cols}{extra_col}) VALUES ({base_phs}{extra_ph})", vals)
 
     db.commit()
     ws_emit("ratimbum_new_reply", {
@@ -5445,12 +5528,17 @@ def system_birthday_post(body: dict, user=Depends(require_level(3)), db=Depends(
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
     text = f"Hoje é aniversário de @{target['name']}! 🎂 Parabenize-o(a)!"
     post_id = str(uuid.uuid4())
-    db.execute("""INSERT INTO ratimbum_posts
-        (id, author_key, author_name, author_initials, author_color, author_photo_url,
-         author_role, author_type, text, mentions, reactions, created_at, is_celebration)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (post_id, 'system', 'Axis', 'AX', '#C9A84C', '', 'Sistema', 'system',
-         text, json.dumps(['@todos']), '{}', datetime.datetime.utcnow().isoformat(), 1))
+    has_cele = _check_celebration_column(db)
+    extra_col = ", is_celebration" if has_cele else ""
+    extra_ph = ", %s" if has_cele else ""
+    base_cols = ("id, author_key, author_name, author_initials, author_color, author_photo_url, "
+                 "author_role, author_type, text, mentions, reactions, created_at")
+    base_phs = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s"
+    vals = [post_id, 'system', 'Axis', 'AX', '#C9A84C', '', 'Sistema', 'system',
+            text, json.dumps(['@todos']), '{}', datetime.datetime.utcnow().isoformat()]
+    if has_cele:
+        vals.append(1)
+    db.execute(f"INSERT INTO ratimbum_posts ({base_cols}{extra_col}) VALUES ({base_phs}{extra_ph})", vals)
     log_audit(db, 'system', 'ratimbum_system_birthday', user_key,
               f"Post automático de aniversário para {target['name']}")
     db.commit()
@@ -5475,6 +5563,18 @@ def system_birthday_post(body: dict, user=Depends(require_level(3)), db=Depends(
         "created_at": datetime.datetime.utcnow().isoformat(),
     }, rooms=["all"])
     return {"ok": True, "id": post_id}
+
+
+@app.get("/api/ratimbum/online")
+def ratimbum_online_users(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""
+        SELECT p.user_key, u.name, u.initials, u.color, u.photo_url, u.role
+        FROM presence p
+        JOIN users u ON u.key = p.user_key
+        WHERE p.is_online = 1
+        ORDER BY u.name ASC
+    """).fetchall()
+    return {"online": [dict(r) for r in rows]}
 
 
 # Expose a unified ASGI app (FastAPI + Socket.IO)
