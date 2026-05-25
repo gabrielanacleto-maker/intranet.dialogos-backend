@@ -233,6 +233,32 @@ def init_db():
                 default_folders
             )
 
+        # ── POPS (Procedimento Operacional Padrão) ────────────────────────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS pop_modules (
+                id TEXT PRIMARY KEY,
+                folder_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                icon TEXT NOT NULL,
+                position_order INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS pop_files (
+                id TEXT PRIMARY KEY,
+                module_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0,
+                mime_type TEXT DEFAULT '',
+                uploaded_by TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pop_modules_folder ON pop_modules(folder_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pop_files_module ON pop_files(module_id)")
+
         # Seed POPs modules if POPs Gerais folder exists and no modules exist
         c.execute("SELECT id FROM folders WHERE name='POPs Gerais'")
         row = c.fetchone()
@@ -465,32 +491,6 @@ def init_db():
         c.execute("ALTER TABLE ratimbum_posts ADD COLUMN IF NOT EXISTS is_celebration INTEGER DEFAULT 1")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_created ON ratimbum_posts(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_reactions_post ON ratimbum_reactions(post_id)")
-
-        # ── POPS (Procedimento Operacional Padrão) ────────────────────────────────
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS pop_modules (
-                id TEXT PRIMARY KEY,
-                folder_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                icon TEXT NOT NULL,
-                position_order INTEGER DEFAULT 0,
-                created_at TEXT NOT NULL
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS pop_files (
-                id TEXT PRIMARY KEY,
-                module_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                url TEXT NOT NULL,
-                size INTEGER NOT NULL DEFAULT 0,
-                mime_type TEXT DEFAULT '',
-                uploaded_by TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_pop_modules_folder ON pop_modules(folder_id)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_pop_files_module ON pop_files(module_id)")
 
         # ── MISSING INDEXES ─────────────────────────────────────────────────────
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_feed_created ON posts(feed, pinned, created_at DESC)")
