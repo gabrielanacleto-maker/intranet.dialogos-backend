@@ -2785,6 +2785,113 @@ def export_price_table(folder_id: str, user=Depends(get_current_user), db=Depend
         result.append(row)
     return result
 
+# ── POPS (Procedimento Operacional Padrão) ─────────────────────────────────────
+
+ALLOWED_POP_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".xml", ".json", ".mp4", ".mp3"}
+MAX_POP_FILE_SIZE = 3 * 1024 * 1024  # 3MB
+
+@app.get("/api/pops-modules")
+def list_pop_modules(folder_id: str = Query(...), user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("SELECT * FROM pop_modules WHERE folder_id=%s ORDER BY position_order ASC", (folder_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/pops-modules")
+def create_pop_module(body: POPModuleRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    module_id = str(uuid.uuid4())
+    db.execute("""INSERT INTO pop_modules (id, folder_id, name, icon, position_order, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s)""",
+        (module_id, body.folder_id, body.name, body.icon, body.position_order or 0,
+         datetime.datetime.utcnow().isoformat())
+    )
+    db.commit()
+    return {"ok": True, "id": module_id}
+
+@app.put("/api/pops-modules/{module_id}")
+def update_pop_module(module_id: str, body: POPModuleRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    existing = db.execute("SELECT * FROM pop_modules WHERE id=%s", (module_id,)).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Módulo não encontrado")
+    db.execute("UPDATE pop_modules SET name=%s, icon=%s, position_order=%s WHERE id=%s",
+        (body.name, body.icon, body.position_order or 0, module_id))
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/pops-modules/{module_id}")
+def delete_pop_module(module_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
+    existing = db.execute("SELECT * FROM pop_modules WHERE id=%s", (module_id,)).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Módulo não encontrado")
+    db.execute("DELETE FROM pop_files WHERE module_id=%s", (module_id,))
+    db.execute("DELETE FROM pop_modules WHERE id=%s", (module_id,))
+    db.commit()
+    return {"ok": True}
+
+@app.get("/api/pops-modules/{module_id}/files")
+def list_pop_files(module_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("SELECT * FROM pop_files WHERE module_id=%s ORDER BY created_at DESC", (module_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/pops-modules/{module_id}/files")
+def upload_pop_file(
+    module_id: str,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+    db=Depends(get_db)
+):
+    module = db.execute("SELECT * FROM pop_modules WHERE id=%s", (module_id,)).fetchone()
+    if not module:
+        raise HTTPException(status_code=404, detail="Módulo não encontrado")
+    _check_upload_rate_limit(user["key"])
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Arquivo sem nome")
+
+    ext = Path(file.filename).suffix.lower()
+    if _is_executable(ext):
+        raise HTTPException(status_code=400, detail="Arquivos executáveis não são permitidos")
+    if ext not in ALLOWED_POP_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Extensão {ext} não permitida para POPs")
+
+    if file.size and file.size > MAX_POP_FILE_SIZE:
+        raise HTTPException(status_code=400, detail=f"Arquivo muito grande (máx 3MB)")
+
+    try:
+        unique_name = f"{uuid.uuid4()}{ext}"
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="dialogos/pops",
+            public_id=unique_name.replace(ext, ""),
+            resource_type="auto"
+        )
+        url = result["secure_url"]
+        file_id = str(uuid.uuid4())
+        db.execute("""INSERT INTO pop_files (id, module_id, name, url, size, mime_type, uploaded_by, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (file_id, module_id, file.filename, url,
+             file.size or 0, file.content_type or "",
+             user["name"], datetime.datetime.utcnow().isoformat())
+        )
+        _notify(db, title="📄 POP enviado",
+                message=f"{user['name']} enviou {file.filename} para {module['name']}",
+                ntype="system", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=file_id, play_sound=False)
+        db.commit()
+        return {"ok": True, "url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/pops-files/{file_id}")
+def delete_pop_file(file_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    f = db.execute("SELECT * FROM pop_files WHERE id=%s", (file_id,)).fetchone()
+    if not f:
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    if f["uploaded_by"] != user["name"] and user["access_level"] < 2:
+        raise HTTPException(status_code=403, detail="Você só pode remover seus próprios arquivos")
+    db.execute("DELETE FROM pop_files WHERE id=%s", (file_id,))
+    db.commit()
+    return {"ok": True}
+
 # ── CALENDAR EVENTS ───────────────────────────────────────────────────────────
 
 @app.get("/api/calendar")

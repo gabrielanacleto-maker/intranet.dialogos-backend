@@ -219,6 +219,13 @@ class AtualizarComunicadoRequest(BaseModel):
     is_draft: Optional[bool] = None
 
 # ── Ra-Tim-Bum ──────────────────────────────────────────────────────────────────
+# ── POPS ────────────────────────────────────────────────────────────────────────
+class POPModuleRequest(BaseModel):
+    folder_id: str
+    name: str
+    icon: str
+    position_order: Optional[int] = 0
+
 class CreateRatimbumPostRequest(BaseModel):
     text: str
     filter: str = "all"

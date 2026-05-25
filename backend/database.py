@@ -2,6 +2,7 @@ import psycopg2
 import psycopg2.extras
 import os
 import uuid
+import datetime
 
 from auth import hash_password
 from dotenv import load_dotenv
@@ -232,6 +233,24 @@ def init_db():
                 default_folders
             )
 
+        # Seed POPs modules if POPs Gerais folder exists and no modules exist
+        c.execute("SELECT id FROM folders WHERE name='POPs Gerais'")
+        pops_folder = c.fetchone()
+        if pops_folder:
+            c.execute("SELECT COUNT(*) FROM pop_modules WHERE folder_id=%s", (pops_folder["id"],))
+            if c.fetchone()[0] == 0:
+                pop_modules = [
+                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Recepção', '/Recepção.png', 0),
+                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Financeiro', '/Financeiro.png', 1),
+                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Serviços Gerais', '/Limpeza.png', 2),
+                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Marketing', '/Marketing.png', 3),
+                    (str(uuid.uuid4()), pops_folder["id"], 'Módulo Comercial', '/Comercial.png', 4),
+                ]
+                c.executemany(
+                    "INSERT INTO pop_modules (id, folder_id, name, icon, position_order, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+                    [(mid, fid, name, icon, pos, datetime.datetime.utcnow().isoformat()) for mid, fid, name, icon, pos in pop_modules]
+                )
+
         c.execute("SELECT COUNT(*) FROM social_rooms")
         if c.fetchone()[0] == 0:
             room_id = str(uuid.uuid4())
@@ -445,6 +464,32 @@ def init_db():
         c.execute("ALTER TABLE ratimbum_posts ADD COLUMN IF NOT EXISTS is_celebration INTEGER DEFAULT 1")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_created ON ratimbum_posts(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_reactions_post ON ratimbum_reactions(post_id)")
+
+        # ── POPS (Procedimento Operacional Padrão) ────────────────────────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS pop_modules (
+                id TEXT PRIMARY KEY,
+                folder_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                icon TEXT NOT NULL,
+                position_order INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS pop_files (
+                id TEXT PRIMARY KEY,
+                module_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0,
+                mime_type TEXT DEFAULT '',
+                uploaded_by TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pop_modules_folder ON pop_modules(folder_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pop_files_module ON pop_files(module_id)")
 
         # ── MISSING INDEXES ─────────────────────────────────────────────────────
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_feed_created ON posts(feed, pinned, created_at DESC)")
