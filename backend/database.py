@@ -217,6 +217,7 @@ def init_db():
         c.execute("SELECT COUNT(*) FROM folders")
         if c.fetchone()[0] == 0:
             default_folders = [
+                (str(uuid.uuid4()), 'Guias Bradesco', '/bradesco.png', 'all', ''),
                 (str(uuid.uuid4()), 'POPs Gerais', '📋', 'all', ''),
                 (str(uuid.uuid4()), 'POPs Financeiros', '📊', 'platina', ''),
                 (str(uuid.uuid4()), 'Contratos & Relatórios', '📑', 'diamante', ''),
