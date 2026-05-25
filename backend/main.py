@@ -3181,6 +3181,16 @@ def get_leaderboard(month: str = None, user=Depends(get_current_user), db=Depend
         "total_users": len(result)
     }
 
+@app.get("/api/gamificacao/leaderboard-months")
+def get_leaderboard_months(user=Depends(get_current_user), db=Depends(get_db)):
+    """Listar meses com ranking disponível"""
+    rows = db.execute("""
+        SELECT DISTINCT month FROM monthly_ranking
+        ORDER BY month DESC
+    """).fetchall()
+    months = [dict(r)["month"] for r in rows]
+    return months
+
 @app.post("/api/gamificacao/update-monthly-ranking")
 def update_monthly_ranking(user=Depends(require_level(3)), db=Depends(get_db)):
     """Admin recalcula o ranking mensal (rodar 1x por mês)"""
