@@ -444,6 +444,14 @@ def init_db():
         c.execute("ALTER TABLE ratimbum_posts ADD COLUMN IF NOT EXISTS is_celebration INTEGER DEFAULT 1")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_created ON ratimbum_posts(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_reactions_post ON ratimbum_reactions(post_id)")
+
+        # ── MISSING INDEXES ─────────────────────────────────────────────────────
+        c.execute("CREATE INDEX IF NOT EXISTS idx_posts_feed_created ON posts(feed, pinned, created_at DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author_key)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_post_views_post ON post_views(post_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_author ON ratimbum_posts(author_key)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user_comm ON communication_reads(user_key, communication_id)")
+
         conn.commit()
         print("✅ Banco de dados inicializado.")
 

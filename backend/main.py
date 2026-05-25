@@ -258,6 +258,22 @@ def _extract_socket_token(environ, auth):
         return qs["token"][0]
     return None
 
+_user_cache = {}
+_USER_CACHE_TTL = 300
+
+def _get_user_cache(user_key):
+    entry = _user_cache.get(user_key)
+    if entry and time.time() - entry["ts"] < _USER_CACHE_TTL:
+        return entry["data"]
+    _user_cache.pop(user_key, None)
+    return None
+
+def _set_user_cache(user_key, data):
+    _user_cache[user_key] = {"data": data, "ts": time.time()}
+
+def _invalidate_user_cache(user_key):
+    _user_cache.pop(user_key, None)
+
 _presence = {}
 _PRESENCE_TIMEOUT = 60
 
@@ -386,11 +402,17 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         if not payload:
             raise HTTPException(status_code=401, detail="Token inválido ou expirado")
 
+        cached = _get_user_cache(payload["sub"])
+        if cached:
+            return cached
+
         with get_db_context() as db:
             user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
             if not user_row:
                 raise HTTPException(status_code=401, detail="Usuário não encontrado")
-            return dict(user_row)
+            user_data = dict(user_row)
+            _set_user_cache(payload["sub"], user_data)
+            return user_data
 
 def get_current_user_from_token(token: str = Query(None), authorization: str = Header(None)):
     jwt_token = None
@@ -403,11 +425,18 @@ def get_current_user_from_token(token: str = Query(None), authorization: str = H
     payload = verify_token(jwt_token)
     if not payload:
         raise HTTPException(status_code=401, detail="Token inválido ou expirado")
+
+    cached = _get_user_cache(payload["sub"])
+    if cached:
+        return cached
+
     with get_db_context() as db:
         user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
         if not user_row:
             raise HTTPException(status_code=401, detail="Usuário não encontrado")
-        return dict(user_row)
+        user_data = dict(user_row)
+        _set_user_cache(payload["sub"], user_data)
+        return user_data
 
 def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
         if not credentials:
@@ -602,6 +631,9 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
             body.points, target_key)
         )
         db.commit()
+        _invalidate_user_cache(target_key)
+        if user["key"] != target_key:
+            _invalidate_user_cache(user["key"])
         return {"ok": True}
 
 @app.post("/api/users/{target_key}/reset-password")
@@ -627,6 +659,7 @@ def delete_user(target_key: str, user=Depends(require_level(2)), db=Depends(get_
         raise HTTPException(status_code=403, detail="Regra de ouro violada.")
     db.execute("DELETE FROM users WHERE key=%s", (target_key,))
     db.commit()
+    _invalidate_user_cache(target_key)
     log_action(db, user["key"], target_key, "Exclusão de Usuário", f"Removeu {target['name']}")
     return {"ok": True}
 
@@ -649,6 +682,7 @@ def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user), d
 
         db.execute("UPDATE users SET photo_url=%s WHERE key=%s", (url, user["key"]))
         db.commit()
+        _invalidate_user_cache(user["key"])
         _notify(db, title="📸 Foto atualizada",
                 message=f"{user['name']} atualizou sua foto de perfil",
                 ntype="system", audience="all",
@@ -663,6 +697,7 @@ def update_about_me(body: dict, user=Depends(get_current_user), db=Depends(get_d
     about_text = (body or {}).get("text", "")
     db.execute("UPDATE users SET about_me=%s WHERE key=%s", (about_text, user["key"]))
     db.commit()
+    _invalidate_user_cache(user["key"])
     return {"ok": True}
 
 
@@ -2276,7 +2311,9 @@ def update_points(target_key: str, body: PointsRequest, user=Depends(require_lev
             sender_key=user["key"], sender_name=user["name"],
             play_sound=True)
     db.commit()
+    _invalidate_user_cache(target_key)
     return {"ok": True}
+
 
 # ── ORGANOGRAM ────────────────────────────────────────────────────────────────
 
@@ -4949,6 +4986,7 @@ def assign_manager(body: AssignManagerRequest, user=Depends(get_current_user), d
         (body.manager_key, body.target_user_key)
     )
     db.commit()
+    _invalidate_user_cache(body.target_user_key)
 
     log_action(
         db, user["key"], body.target_user_key,
@@ -5024,6 +5062,7 @@ def set_org_position(body: SetOrgPositionRequest, user=Depends(get_current_user)
         (body.org_position, body.target_user_key)
     )
     db.commit()
+    _invalidate_user_cache(body.target_user_key)
 
     log_action(
         db, user["key"], body.target_user_key,
@@ -5031,6 +5070,7 @@ def set_org_position(body: SetOrgPositionRequest, user=Depends(get_current_user)
         f"org_position definido como: {body.org_position}"
     )
     return {"ok": True}
+
 
 # ── RA-TIM-BUM ──────────────────────────────────────────────────────────────────
 
