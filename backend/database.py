@@ -499,7 +499,7 @@ def init_db():
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 event_date TEXT NOT NULL,
-                image_url TEXT NOT NULL DEFAULT "",
+                image_url TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )
         """)
