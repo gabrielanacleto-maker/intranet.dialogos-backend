@@ -492,6 +492,18 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_created ON ratimbum_posts(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_reactions_post ON ratimbum_reactions(post_id)")
 
+
+        # -- EVENTOS ---------------------------------------------------------
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                image_url TEXT NOT NULL DEFAULT "",
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date DESC)")
         # ── MISSING INDEXES ─────────────────────────────────────────────────────
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_feed_created ON posts(feed, pinned, created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author_key)")

@@ -5854,5 +5854,21 @@ def ratimbum_online_users(user=Depends(get_current_user), db=Depends(get_db)):
     return {"online": [dict(r) for r in rows]}
 
 
+
+# -- EVENTOS ---------------------------------------------------------
+@app.get("/api/events")
+def get_events(user=Depends(get_current_user), db=Depends(get_db)):
+    today = datetime.date.today().isoformat()
+    row = db.execute("""
+        SELECT id, name, event_date, image_url, created_at
+        FROM events
+        WHERE event_date >= %s
+        ORDER BY event_date ASC
+        LIMIT 1
+    """, (today,)).fetchone()
+    if not row:
+        return {"event": None}
+    return {"event": dict(row)}
+
 # Expose a unified ASGI app (FastAPI + Socket.IO)
 app = socketio.ASGIApp(sio, app)
