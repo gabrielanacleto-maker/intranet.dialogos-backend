@@ -5870,5 +5870,20 @@ def get_events(user=Depends(get_current_user), db=Depends(get_db)):
         return {"event": None}
     return {"event": dict(row)}
 
+# -- EVENTO (card APNG) ----------------------------------------------
+@app.get("/api/evento")
+def get_evento(user=Depends(get_current_user), db=Depends(get_db)):
+    today = datetime.date.today().isoformat()
+    row = db.execute("""
+        SELECT id, titulo, data_inicio, data_termino, apng_url, created_at
+        FROM evento
+        WHERE data_termino >= %s
+        ORDER BY data_inicio ASC
+        LIMIT 1
+    """, (today,)).fetchone()
+    if not row:
+        return {"evento": None}
+    return {"evento": dict(row)}
+
 # Expose a unified ASGI app (FastAPI + Socket.IO)
 app = socketio.ASGIApp(sio, app)

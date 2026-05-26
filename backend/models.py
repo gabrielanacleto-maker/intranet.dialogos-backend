@@ -235,3 +235,9 @@ class ReactRatimbumRequest(BaseModel):
 
 class CreateRatimbumReplyRequest(BaseModel):
     text: str
+
+class EventoRequest(BaseModel):
+    titulo: Optional[str] = ''
+    data_inicio: str
+    data_termino: str
+    apng_url: Optional[str] = ''

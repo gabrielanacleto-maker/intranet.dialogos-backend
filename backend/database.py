@@ -504,6 +504,19 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date DESC)")
+
+        # -- EVENTO (card eventos com APNG) -----------------------------------
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS evento (
+                id TEXT PRIMARY KEY,
+                titulo TEXT DEFAULT '',
+                data_inicio TEXT NOT NULL,
+                data_termino TEXT NOT NULL,
+                apng_url TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_evento_datas ON evento(data_inicio, data_termino)")
         # ── MISSING INDEXES ─────────────────────────────────────────────────────
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_feed_created ON posts(feed, pinned, created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author_key)")
