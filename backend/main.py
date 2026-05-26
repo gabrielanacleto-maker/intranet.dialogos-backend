@@ -2374,6 +2374,12 @@ def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user
     _log_atividade(db, "humor", user["key"],
                    f"{user['name']} respondeu o Termômetro do Humor")
 
+    _notify(db, title="😊 Humor registrado",
+            message=f"{user['name']} respondeu o Termômetro do Humor",
+            ntype="humor",
+            sender_key=user["key"], sender_name=user["name"],
+            play_sound=False)
+
     db.commit()
 
     ip = request.client.host if request.client else "desconhecido"
