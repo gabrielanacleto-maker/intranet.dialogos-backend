@@ -2410,6 +2410,8 @@ def _pode_ver_relatorio(user: dict, paciente_key: str) -> bool:
         return True
     if user.get("is_admin") or user.get("is_admin_user"):
         return True
+    if user.get("is_rh") or user.get("is_leader") or user.get("is_diretor"):
+        return True
     return False
 
 @app.get("/api/relatorio/humor/{paciente_key}")

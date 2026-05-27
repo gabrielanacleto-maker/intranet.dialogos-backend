@@ -227,6 +227,7 @@ def init_db():
                 (str(uuid.uuid4()), 'Recursos Humanos', '/Recursos Humanos.png', 'rh', ''),
                 (str(uuid.uuid4()), 'Treinamentos', '🎓', 'all', ''),
                 (str(uuid.uuid4()), 'Gestão de Acessos', '🔐', 'diamante', ''),
+                (str(uuid.uuid4()), 'Especialidades', '/especialidades-medicas.png', 'all', ''),
             ]
             c.executemany(
                 "INSERT INTO folders (id, name, icon, level, drive_link) VALUES (%s,%s,%s,%s,%s)",
@@ -311,6 +312,11 @@ def init_db():
             c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS paused_seconds INTEGER DEFAULT 0")
             c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS delegated_by TEXT DEFAULT NULL")
             c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS concluida_em TEXT DEFAULT NULL")
+        except:
+            pass
+
+        try:
+            c.execute("ALTER TABLE tarefas DROP CONSTRAINT IF EXISTS tarefas_tipo_check")
         except:
             pass
 
