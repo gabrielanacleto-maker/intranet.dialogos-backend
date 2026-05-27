@@ -4303,12 +4303,13 @@ def _can_assign(user: dict) -> bool:
 @app.get("/api/tarefas/listar")
 def listar_tarefas(
     filtro: str = "todas",
+    user_key: str = "",
     user=Depends(get_current_user),
     db=Depends(get_db)
 ):
     hoje = datetime.date.today().isoformat()
     agora = datetime.datetime.utcnow().isoformat()
-    user_key = user["key"]
+    target_key = user_key if (user_key and _is_gestor(user)) else user["key"]
 
     # Auto-atualizar tarefas em andamento com prazo vencido para atrasadas
     db.execute(
@@ -4317,7 +4318,7 @@ def listar_tarefas(
            AND status = 'andamento'
            AND prazo < %s
            AND concluida = 0""",
-        (agora, user_key, hoje)
+        (agora, target_key, hoje)
     )
 
     base_query = """SELECT t.*,
@@ -4333,18 +4334,18 @@ def listar_tarefas(
 
     if filtro == "hoje":
         query = base_query + " AND t.prazo = %s ORDER BY t.prazo ASC, t.created_at DESC"
-        rows = db.execute(query, (user_key, hoje)).fetchall()
+        rows = db.execute(query, (target_key, hoje)).fetchall()
     elif filtro == "amanha":
         amanha = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
         query = base_query + " AND t.prazo = %s ORDER BY t.prazo ASC, t.created_at DESC"
-        rows = db.execute(query, (user_key, amanha)).fetchall()
+        rows = db.execute(query, (target_key, amanha)).fetchall()
     elif filtro == "semana":
         fim_semana = (datetime.date.today() + datetime.timedelta(days=7)).isoformat()
         query = base_query + " AND t.prazo <= %s ORDER BY t.prazo ASC, t.created_at DESC"
-        rows = db.execute(query, (user_key, fim_semana)).fetchall()
+        rows = db.execute(query, (target_key, fim_semana)).fetchall()
     else:
         query = base_query + " ORDER BY t.prazo ASC, t.created_at DESC"
-        rows = db.execute(query, (user_key,)).fetchall()
+        rows = db.execute(query, (target_key,)).fetchall()
 
     return [dict(r) for r in rows]
 
@@ -4398,15 +4399,19 @@ def listar_historico_tarefas(
     db=Depends(get_db)
 ):
     user_key = user["key"]
-    conditions = ["(t.destinatario_id = %s OR t.criado_por = %s)"]
-    params = [user_key, user_key]
+    conditions = []
+    params = []
+
+    if _is_gestor(user) and colaborador_filter:
+        conditions.append("t.destinatario_id = %s")
+        params.append(colaborador_filter)
+    else:
+        conditions.append("(t.destinatario_id = %s OR t.criado_por = %s)")
+        params += [user_key, user_key]
 
     if status_filter:
         conditions.append("t.status = %s")
         params.append(status_filter)
-    if colaborador_filter:
-        conditions.append("t.destinatario_id = %s")
-        params.append(colaborador_filter)
     if data_inicio:
         conditions.append("t.prazo >= %s")
         params.append(data_inicio)
