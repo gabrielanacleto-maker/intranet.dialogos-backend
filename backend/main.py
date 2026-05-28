@@ -762,7 +762,7 @@ def get_posts(feed: str = "feed", limit: int = 20, offset: int = 0,
         "SELECT * FROM posts WHERE feed=%s ORDER BY pinned DESC, created_at DESC LIMIT %s OFFSET %s",
         (feed, limit, offset)
     ).fetchall()
-    total = db.execute("SELECT COUNT(*) FROM posts WHERE feed=%s", (feed,)).fetchone()[0]
+    total = db.execute("SELECT COUNT(*) FROM posts WHERE feed=%s", (feed,)).fetchone()["count"]
     result = []
     for r in rows:
         d = dict(r)
@@ -5460,7 +5460,7 @@ def get_ratimbum_posts(filter: str = "all", limit: int = 30, offset: int = 0,
             (limit, offset)
         ).fetchall()
 
-    total = db.execute("SELECT COUNT(*) FROM ratimbum_posts").fetchone()[0]
+    total = db.execute("SELECT COUNT(*) FROM ratimbum_posts").fetchone()["count"]
     result = []
     for r in rows:
         d = _format_ratimbum_post(r)
@@ -5782,21 +5782,21 @@ def get_ratimbum_month_stats(user=Depends(get_current_user), db=Depends(get_db))
     posts_count = db.execute(
         "SELECT COUNT(*) FROM ratimbum_posts WHERE created_at >= %s AND created_at < %s",
         (first_day, next_month)
-    ).fetchone()[0]
+    ).fetchone()["count"]
     reactions_count = db.execute(
         "SELECT COUNT(*) FROM ratimbum_reactions r JOIN ratimbum_posts p ON r.post_id=p.id WHERE p.created_at >= %s AND p.created_at < %s",
         (first_day, next_month)
-    ).fetchone()[0]
+    ).fetchone()["count"]
     current_month = datetime.date.today().month
     birthdays_count = db.execute(
         "SELECT COUNT(*) FROM aniversarios WHERE ativo=true AND mes=%s",
         (current_month,)
-    ).fetchone()[0]
+    ).fetchone()["count"]
     unique_authors = db.execute(
         "SELECT COUNT(DISTINCT author_key) FROM ratimbum_posts WHERE created_at >= %s AND created_at < %s AND author_type='user'",
         (first_day, next_month)
-    ).fetchone()[0]
-    total_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    ).fetchone()["count"]
+    total_users = db.execute("SELECT COUNT(*) FROM users").fetchone()["count"]
     engagement = round((unique_authors / max(total_users, 1)) * 100, 1)
     return {
         "messages": posts_count,
