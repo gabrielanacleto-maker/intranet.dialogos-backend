@@ -4003,12 +4003,18 @@ def _can_evaluate(user: dict) -> bool:
 
 
 @app.get("/api/feedbacks/{target_key}")
-def get_feedbacks(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
+def get_feedbacks(target_key: str, user=Depends(get_current_user), db=Depends(get_db), direction: str = 'received'):
     _ensure_feedback_tables(db)
-    rows = db.execute(
-        "SELECT * FROM feedbacks WHERE target_user_key=%s ORDER BY created_at DESC",
-        (target_key,)
-    ).fetchall()
+    if direction == 'sent':
+        rows = db.execute(
+            "SELECT * FROM feedbacks WHERE evaluator_key=%s ORDER BY created_at DESC",
+            (target_key,)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM feedbacks WHERE target_user_key=%s ORDER BY created_at DESC",
+            (target_key,)
+        ).fetchall()
     feedbacks = []
     is_owner = user["key"] == target_key
     for r in rows:
