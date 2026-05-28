@@ -583,6 +583,11 @@ def list_users(user=Depends(get_current_user), db=Depends(get_db)):
 
 @app.post("/api/users")
 def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+        if user["access_level"] < 3:
+            if body.access_level >= 2:
+                raise HTTPException(status_code=403, detail="Apenas Admin Server (nível 3) pode criar usuários com nível 2 ou superior.")
+            if body.is_admin or body.is_admin_user:
+                raise HTTPException(status_code=403, detail="Apenas Admin Server (nível 3) pode conceder permissões de admin.")
         key = body.key.lower().strip()
         if db.execute("SELECT 1 FROM users WHERE key=%s", (key,)).fetchone():
             raise HTTPException(status_code=400, detail="Usuário já existe.")
@@ -619,6 +624,15 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
                 raise HTTPException(status_code=403, detail="Sem permissão.")
             if user["access_level"] == 2 and target["access_level"] >= 2:
                 raise HTTPException(status_code=403, detail="Você não pode editar admins.")
+        # Impedir auto-promoção: usuário não pode alterar próprio access_level
+        if user["key"] == target_key and body.access_level != target["access_level"]:
+            raise HTTPException(status_code=403, detail="Você não pode alterar seu próprio nível de acesso.")
+        # Nível 2 não pode definir access_level >= 2 nem conceder flags de admin
+        if user["access_level"] == 2:
+            if body.access_level >= 2:
+                raise HTTPException(status_code=403, detail="Apenas Admin Server (nível 3) pode definir nível 2 ou superior.")
+            if body.is_admin or body.is_admin_user:
+                raise HTTPException(status_code=403, detail="Apenas Admin Server (nível 3) pode conceder permissões de admin.")
         db.execute("""UPDATE users SET name=%s, initials=%s, role=%s, dept=%s, level=%s,
             color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, nivel_dourado=%s, points=%s
             WHERE key=%s""",
