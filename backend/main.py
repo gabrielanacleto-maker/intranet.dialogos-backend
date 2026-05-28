@@ -1707,7 +1707,13 @@ def presence_logout(user=Depends(get_current_user), db=Depends(get_db)):
 
 @app.get("/api/presence")
 def get_presence(user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute("SELECT user_key, is_online, last_seen, last_activity FROM presence").fetchall()
+    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(minutes=2)).isoformat()
+    rows = db.execute("""
+        SELECT user_key,
+               CASE WHEN is_online=1 AND last_activity >= %s THEN 1 ELSE 0 END AS is_online,
+               last_seen, last_activity
+        FROM presence
+    """, (cutoff,)).fetchall()
     return [dict(r) for r in rows]
 
 # ── MURAL ITEMS ───────────────────────────────────────────────────────────────
@@ -5871,13 +5877,14 @@ def system_birthday_post(body: dict, user=Depends(require_level(3)), db=Depends(
 
 @app.get("/api/ratimbum/online")
 def ratimbum_online_users(user=Depends(get_current_user), db=Depends(get_db)):
+    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(minutes=2)).isoformat()
     rows = db.execute("""
         SELECT p.user_key, u.name, u.initials, u.color, u.photo_url, u.role
         FROM presence p
         JOIN users u ON u.key = p.user_key
-        WHERE p.is_online = 1
+        WHERE p.is_online = 1 AND p.last_activity >= %s
         ORDER BY u.name ASC
-    """).fetchall()
+    """, (cutoff,)).fetchall()
     return {"online": [dict(r) for r in rows]}
 
 
