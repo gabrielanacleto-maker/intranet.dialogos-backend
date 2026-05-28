@@ -398,6 +398,10 @@ def init_db():
                 FOREIGN KEY (objetivo_id) REFERENCES objetivos_def(id)
             )
         """)
+        try:
+            c.execute("ALTER TABLE objetivos_progress ADD COLUMN ultimo_reset TEXT")
+        except Exception:
+            pass
         c.execute("""
             CREATE TABLE IF NOT EXISTS objetivos_audit_log (
                 id TEXT PRIMARY KEY,

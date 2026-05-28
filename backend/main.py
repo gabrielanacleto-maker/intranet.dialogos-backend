@@ -3614,12 +3614,6 @@ def _auto_concluir_login(db, user):
 
     prog = db.execute("SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s", (obj["id"], uk)).fetchone()
 
-    # One-time migration: if progress exists but ultimo_reset is NULL (manual/old style), wipe and restart fresh
-    if prog and prog.get("ultimo_reset") is None:
-        db.execute("DELETE FROM objetivos_progress WHERE id=%s", (prog["id"],))
-        db.execute("DELETE FROM user_points WHERE user_key=%s AND reason LIKE %s", (uk, "%Login%"))
-        prog = None
-
     if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje_str:
         return False
 
@@ -3744,8 +3738,9 @@ def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
                 """UPDATE objetivos_progress SET progresso_atual=0,
                    status=CASE WHEN status='concluido' THEN 'pendente' ELSE status END,
                    ultimo_reset=%s
-                   WHERE objetivo_id=%s""",
-                (hoje_dt, obj["id"])
+                   WHERE objetivo_id=%s
+                   AND (ultimo_reset IS NULL OR ultimo_reset NOT LIKE %s)""",
+                (hoje_dt, obj["id"], hoje_dt[:10] + '%')
             )
             resetados += cur.rowcount
     db.commit()
