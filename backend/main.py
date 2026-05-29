@@ -5920,5 +5920,173 @@ def get_evento(user=Depends(get_current_user), db=Depends(get_db)):
         return {"evento": None}
     return {"evento": dict(row)}
 
+# ── GESTÃO ────────────────────────────────────────────────────────────────────
+
+def _can_gestao(user: dict) -> bool:
+    return bool(
+        user.get("is_admin") or user.get("is_admin_user") or
+        user.get("is_rh") or user.get("is_diretor") or user.get("is_leader") or
+        user.get("access_level", 0) >= 1 or
+        user.get("org_position") in ("gestor", "supervisor", "lider")
+    )
+
+@app.get("/api/gestao/dashboard")
+def gestao_dashboard(user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para acessar a Gestão.")
+
+    users_rows = db.execute("""
+        SELECT key, name, initials, color, photo_url, role, dept, level, points,
+               is_admin, is_admin_user, is_rh, is_ouvidor, is_diretor, is_leader,
+               is_orcoma, nivel_dourado, org_position, hire_date
+        FROM users ORDER BY name
+    """).fetchall()
+
+    result = []
+    for u in users_rows:
+        u_dict = dict(u)
+
+        # Objetivos concluídos
+        obj_concluidos = db.execute(
+            """SELECT COUNT(*) as cnt FROM objetivos_progress op
+               JOIN objetivos_def od ON od.id = op.objetivo_id
+               WHERE op.user_key=%s AND op.status='concluido' AND od.ativo=1""",
+            (u_dict["key"],)
+        ).fetchone()["cnt"]
+
+        # Total de objetivos ativos
+        total_obj = db.execute(
+            "SELECT COUNT(*) as cnt FROM objetivos_def WHERE ativo=1"
+        ).fetchone()["cnt"]
+
+        # Feedbacks recebidos
+        fb_recebidos = db.execute(
+            "SELECT COUNT(*) as cnt FROM feedbacks WHERE target_user_key=%s",
+            (u_dict["key"],)
+        ).fetchone()["cnt"]
+
+        # Feedbacks dados (como avaliador)
+        fb_dados = db.execute(
+            "SELECT COUNT(*) as cnt FROM feedbacks WHERE evaluator_key=%s",
+            (u_dict["key"],)
+        ).fetchone()["cnt"]
+
+        # Último humor
+        ultimo_humor = db.execute(
+            "SELECT mood, valor_humor, created_at FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 1",
+            (u_dict["key"],)
+        ).fetchone()
+
+        result.append({
+            "key": u_dict["key"],
+            "name": u_dict["name"],
+            "initials": u_dict["initials"],
+            "color": u_dict["color"],
+            "photo_url": u_dict.get("photo_url", ""),
+            "role": u_dict.get("role", ""),
+            "dept": u_dict.get("dept", ""),
+            "level": u_dict.get("level", "dourado"),
+            "points": u_dict.get("points", 0),
+            "is_admin": bool(u_dict.get("is_admin")),
+            "is_admin_user": bool(u_dict.get("is_admin_user")),
+            "is_rh": bool(u_dict.get("is_rh")),
+            "is_ouvidor": bool(u_dict.get("is_ouvidor")),
+            "is_diretor": bool(u_dict.get("is_diretor")),
+            "is_leader": bool(u_dict.get("is_leader")),
+            "is_orcoma": bool(u_dict.get("is_orcoma")),
+            "nivel_dourado": bool(u_dict.get("nivel_dourado")),
+            "org_position": u_dict.get("org_position", "colaborador"),
+            "hire_date": u_dict.get("hire_date", ""),
+            "stats": {
+                "objetivos_concluidos": obj_concluidos or 0,
+                "total_objetivos": total_obj or 0,
+                "feedbacks_recebidos": fb_recebidos or 0,
+                "feedbacks_dados": fb_dados or 0,
+                "ultimo_humor": dict(ultimo_humor) if ultimo_humor else None,
+            }
+        })
+
+    return result
+
+
+@app.get("/api/gestao/dashboard/{target_key}")
+def gestao_dashboard_usuario(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    target_dict = dict(target)
+    target_dict.pop("password_hash", None)
+
+    hoje = datetime.date.today().isoformat()
+
+    # Objetivos
+    objetivos = db.execute(
+        "SELECT * FROM objetivos_def WHERE ativo=1 ORDER BY nome"
+    ).fetchall()
+    objetivos_data = []
+    for obj in objetivos:
+        prog = db.execute(
+            "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
+            (obj["id"], target_key)
+        ).fetchone()
+        objetivos_data.append({
+            "id": obj["id"],
+            "nome": obj["nome"],
+            "meta_valor": obj["meta_valor"],
+            "periodicidade": obj["periodicidade"],
+            "recompensa_dcoins": obj["recompensa_dcoins"],
+            "progresso": dict(prog) if prog else None,
+        })
+
+    # Feedbacks recebidos
+    feedbacks = db.execute(
+        "SELECT * FROM feedbacks WHERE target_user_key=%s ORDER BY created_at DESC LIMIT 50",
+        (target_key,)
+    ).fetchall()
+
+    # Humor (últimos 30 dias)
+    humor = db.execute(
+        """SELECT * FROM mood_history
+           WHERE user_key=%s AND created_at >= %s
+           ORDER BY created_at ASC""",
+        (target_key, (datetime.datetime.utcnow() - datetime.timedelta(days=30)).isoformat())
+    ).fetchall()
+
+    humor_translated = []
+    for h in humor:
+        hd = dict(h)
+        val = None
+        for v, k in MOOD_VALUES.items():
+            if hd["mood"] == k:
+                val = v
+                break
+        humor_translated.append({
+            "data": hd["created_at"][:10] if hd["created_at"] else "",
+            "valor": val,
+            "label": MOOD_VALUES.get(val, hd["mood"]),
+            "emoji": MOOD_EMOJIS.get(val, "?"),
+            "intensity": hd.get("intensity"),
+            "reason": hd.get("reason", ""),
+        })
+
+    # Atividades recentes
+    atividades = db.execute(
+        "SELECT * FROM atividades_dialogos WHERE autor_key=%s ORDER BY created_at DESC LIMIT 20",
+        (target_key,)
+    ).fetchall()
+
+    return {
+        "user": target_dict,
+        "objetivos": objetivos_data,
+        "feedbacks": [dict(f) for f in feedbacks],
+        "humor": humor_translated,
+        "atividades": [dict(a) for a in atividades],
+    }
+
+
 # Expose a unified ASGI app (FastAPI + Socket.IO)
 app = socketio.ASGIApp(sio, app)
