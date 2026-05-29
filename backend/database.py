@@ -58,27 +58,51 @@ def get_db():
     with get_db_context() as cursor:
         yield cursor
 
+def _column_exists(cursor, table, column):
+    cursor.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name=%s AND column_name=%s",
+        (table, column)
+    )
+    return cursor.fetchone() is not None
+
+def _table_exists(cursor, table):
+    cursor.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name=%s",
+        (table,)
+    )
+    return cursor.fetchone() is not None
+
+def _safe_add_column(cursor, table, column, col_def):
+    if _table_exists(cursor, table) and not _column_exists(cursor, table, column):
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+
+def _safe_drop_constraint(cursor, table, constraint):
+    if _table_exists(cursor, table):
+        cursor.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {constraint}")
+
+def _safe_update_existing(cursor, table, set_expr, where_expr):
+    if _table_exists(cursor, table):
+        cursor.execute(f"UPDATE {table} SET {set_expr} WHERE {where_expr}")
+
 def init_db():
     conn = psycopg2.connect(DB_URL)
     c = conn.cursor()
 
     try:
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS about_me TEXT DEFAULT ''")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_diretor INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_leader INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url TEXT DEFAULT ''")
-        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_role TEXT DEFAULT ''")
-        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_rh INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS author_is_admin INTEGER DEFAULT 0")
+        _safe_add_column(c, 'users', 'about_me', "about_me TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'is_diretor', "is_diretor INTEGER DEFAULT 0")
+        _safe_add_column(c, 'users', 'is_leader', "is_leader INTEGER DEFAULT 0")
+        _safe_add_column(c, 'posts', 'video_url', "video_url TEXT DEFAULT ''")
+        _safe_add_column(c, 'posts', 'author_role', "author_role TEXT DEFAULT ''")
+        _safe_add_column(c, 'posts', 'author_is_rh', "author_is_rh INTEGER DEFAULT 0")
+        _safe_add_column(c, 'posts', 'author_is_admin', "author_is_admin INTEGER DEFAULT 0")
 
-        # ── NOVAS TABELAS ──────────────────────────────────────────────────────
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_orcoma INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS hire_date TEXT DEFAULT ''")  
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_position TEXT DEFAULT 'colaborador'")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_key TEXT DEFAULT NULL")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS nivel_dourado INTEGER DEFAULT 0")
+        _safe_add_column(c, 'users', 'is_orcoma', "is_orcoma INTEGER DEFAULT 0")
+        _safe_add_column(c, 'users', 'hire_date', "hire_date TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'org_position', "org_position TEXT DEFAULT 'colaborador'")
+        _safe_add_column(c, 'users', 'manager_key', "manager_key TEXT DEFAULT NULL")
+        _safe_add_column(c, 'users', 'nivel_dourado', "nivel_dourado INTEGER DEFAULT 0")
 
-        # post_views table
         c.execute("""
             CREATE TABLE IF NOT EXISTS post_views (
                 id TEXT PRIMARY KEY,
@@ -89,7 +113,6 @@ def init_db():
             )
         """)
 
-        # evaluations table
         c.execute("""
             CREATE TABLE IF NOT EXISTS evaluations (
                 id TEXT PRIMARY KEY,
@@ -106,7 +129,6 @@ def init_db():
             )
         """)
 
-        # presence table
         c.execute("""
             CREATE TABLE IF NOT EXISTS presence (
                 user_key TEXT PRIMARY KEY,
@@ -116,7 +138,6 @@ def init_db():
             )
         """)
 
-        # colleague_feedback table (LinkedIn-style)
         c.execute("""
             CREATE TABLE IF NOT EXISTS colleague_feedback (
                 id TEXT PRIMARY KEY,
@@ -129,7 +150,6 @@ def init_db():
             )
         """)
 
-        # audit_log table
         c.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY,
@@ -141,7 +161,6 @@ def init_db():
             )
         """)
 
-        # calendar_events table
         c.execute("""
             CREATE TABLE IF NOT EXISTS calendar_events (
                 id TEXT PRIMARY KEY,
@@ -160,24 +179,14 @@ def init_db():
             )
         """)
 
-        # ADD column nivelDourado to folders  
-        try:
-            c.execute("ALTER TABLE folders ADD COLUMN IF NOT EXISTS nivel_dourado INTEGER DEFAULT 0")
-        except:
-            pass
+        _safe_add_column(c, 'folders', 'nivel_dourado', "nivel_dourado INTEGER DEFAULT 0")
+        _safe_add_column(c, 'folders', 'created_by', "created_by TEXT DEFAULT ''")
+        _safe_add_column(c, 'calendar_events', 'user_key', "user_key TEXT DEFAULT ''")
 
-        # ADD column created_by to folders
-        try:
-            c.execute("ALTER TABLE folders ADD COLUMN IF NOT EXISTS created_by TEXT DEFAULT ''")
-        except:
-            pass
-
-        # Ensure calendar_events has user_key column
-        try:
-            c.execute("ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS user_key TEXT DEFAULT ''")
-            c.execute("UPDATE calendar_events SET user_key = created_by WHERE user_key = '' OR user_key IS NULL")
-        except:
-            pass
+        _safe_update_existing(c, 'calendar_events',
+            "user_key = created_by",
+            "user_key = '' OR user_key IS NULL"
+        )
 
         c.execute("SELECT 1 FROM users WHERE key=%s", ('gabriel',))
         if not c.fetchone():
@@ -234,7 +243,6 @@ def init_db():
                 default_folders
             )
 
-        # ── POPS (Procedimento Operacional Padrão) ────────────────────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS pop_modules (
                 id TEXT PRIMARY KEY,
@@ -260,7 +268,6 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_pop_modules_folder ON pop_modules(folder_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pop_files_module ON pop_files(module_id)")
 
-        # Seed POPs modules if POPs Gerais folder exists and no modules exist
         c.execute("SELECT id FROM folders WHERE name='POPs Gerais'")
         row = c.fetchone()
         if row:
@@ -297,30 +304,22 @@ def init_db():
                  'gabriel', '2026-04-22T00:00:00')
             )
 
-        # ── TAREFAS: add new columns ──────────────────────────────────────────
-        try:
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pendente'")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS custom_status TEXT DEFAULT NULL")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS prioridade TEXT DEFAULT 'media'")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS tipo_tarefa TEXT DEFAULT 'tarefa'")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS recorrencia TEXT DEFAULT 'nenhuma'")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS duration_seconds INTEGER DEFAULT 0")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS started_at TEXT DEFAULT NULL")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS ended_at TEXT DEFAULT NULL")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS delay_reason TEXT DEFAULT NULL")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS delayed_at TEXT DEFAULT NULL")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS paused_seconds INTEGER DEFAULT 0")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS delegated_by TEXT DEFAULT NULL")
-            c.execute("ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS concluida_em TEXT DEFAULT NULL")
-        except:
-            pass
+        _safe_add_column(c, 'tarefas', 'status', "status TEXT DEFAULT 'pendente'")
+        _safe_add_column(c, 'tarefas', 'custom_status', "custom_status TEXT DEFAULT NULL")
+        _safe_add_column(c, 'tarefas', 'prioridade', "prioridade TEXT DEFAULT 'media'")
+        _safe_add_column(c, 'tarefas', 'tipo_tarefa', "tipo_tarefa TEXT DEFAULT 'tarefa'")
+        _safe_add_column(c, 'tarefas', 'recorrencia', "recorrencia TEXT DEFAULT 'nenhuma'")
+        _safe_add_column(c, 'tarefas', 'duration_seconds', "duration_seconds INTEGER DEFAULT 0")
+        _safe_add_column(c, 'tarefas', 'started_at', "started_at TEXT DEFAULT NULL")
+        _safe_add_column(c, 'tarefas', 'ended_at', "ended_at TEXT DEFAULT NULL")
+        _safe_add_column(c, 'tarefas', 'delay_reason', "delay_reason TEXT DEFAULT NULL")
+        _safe_add_column(c, 'tarefas', 'delayed_at', "delayed_at TEXT DEFAULT NULL")
+        _safe_add_column(c, 'tarefas', 'paused_seconds', "paused_seconds INTEGER DEFAULT 0")
+        _safe_add_column(c, 'tarefas', 'delegated_by', "delegated_by TEXT DEFAULT NULL")
+        _safe_add_column(c, 'tarefas', 'concluida_em', "concluida_em TEXT DEFAULT NULL")
 
-        try:
-            c.execute("ALTER TABLE tarefas DROP CONSTRAINT IF EXISTS tarefas_tipo_check")
-        except:
-            pass
+        _safe_drop_constraint(c, 'tarefas', 'tarefas_tipo_check')
 
-        # ── OUVIDORIA ───────────────────────────────────────────────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS ouvidoria (
                 id TEXT PRIMARY KEY,
@@ -335,12 +334,8 @@ def init_db():
             )
         """)
 
-        try:
-            c.execute("ALTER TABLE ouvidoria ADD COLUMN IF NOT EXISTS anonymous INTEGER DEFAULT 0")
-        except:
-            pass
+        _safe_add_column(c, 'ouvidoria', 'anonymous', "anonymous INTEGER DEFAULT 0")
 
-        # ── TASK COMMENTS ──────────────────────────────────────────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS task_comments (
                 id TEXT PRIMARY KEY,
@@ -353,7 +348,6 @@ def init_db():
             )
         """)
 
-        # ── TASK HISTORY ───────────────────────────────────────────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS task_history (
                 id TEXT PRIMARY KEY,
@@ -367,7 +361,6 @@ def init_db():
             )
         """)
 
-        # ── OBJETIVOS GAMIFICADOS ───────────────────────────────────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS objetivos_def (
                 id TEXT PRIMARY KEY,
@@ -398,10 +391,7 @@ def init_db():
                 FOREIGN KEY (objetivo_id) REFERENCES objetivos_def(id)
             )
         """)
-        try:
-            c.execute("ALTER TABLE objetivos_progress ADD COLUMN ultimo_reset TEXT")
-        except Exception:
-            pass
+        _safe_add_column(c, 'objetivos_progress', 'ultimo_reset', "ultimo_reset TEXT")
         c.execute("""
             CREATE TABLE IF NOT EXISTS objetivos_audit_log (
                 id TEXT PRIMARY KEY,
@@ -424,7 +414,6 @@ def init_db():
                 updated_at TEXT NOT NULL
             )
         """)
-        # ── COMUNICADOS ────────────────────────────────────────────────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS communications (
                 id TEXT PRIMARY KEY,
@@ -470,7 +459,6 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_comm_created ON communications(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_comm ON communication_reads(communication_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user ON communication_reads(user_key)")
-        # ── RA-TIM-BUM ─────────────────────────────────────────────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS ratimbum_posts (
                 id TEXT PRIMARY KEY,
@@ -497,13 +485,11 @@ def init_db():
                 UNIQUE(post_id, user_key, emoji)
             )
         """)
-        c.execute("ALTER TABLE ratimbum_posts ADD COLUMN IF NOT EXISTS parent_id TEXT DEFAULT NULL")
-        c.execute("ALTER TABLE ratimbum_posts ADD COLUMN IF NOT EXISTS is_celebration INTEGER DEFAULT 1")
+        _safe_add_column(c, 'ratimbum_posts', 'parent_id', "parent_id TEXT DEFAULT NULL")
+        _safe_add_column(c, 'ratimbum_posts', 'is_celebration', "is_celebration INTEGER DEFAULT 1")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_created ON ratimbum_posts(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_reactions_post ON ratimbum_reactions(post_id)")
 
-
-        # -- EVENTOS ---------------------------------------------------------
         c.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
@@ -515,7 +501,6 @@ def init_db():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date DESC)")
 
-        # -- EVENTO (card eventos com APNG) -----------------------------------
         c.execute("""
             CREATE TABLE IF NOT EXISTS evento (
                 id TEXT PRIMARY KEY,
@@ -527,7 +512,6 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_evento_datas ON evento(data_inicio, data_termino)")
-        # ── MISSING INDEXES ─────────────────────────────────────────────────────
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_feed_created ON posts(feed, pinned, created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author_key)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_post_views_post ON post_views(post_id)")
@@ -535,7 +519,7 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user_comm ON communication_reads(user_key, communication_id)")
 
         conn.commit()
-        print("✅ Banco de dados inicializado.")
+        print("Banco de dados inicializado.")
 
     except Exception:
         conn.rollback()
