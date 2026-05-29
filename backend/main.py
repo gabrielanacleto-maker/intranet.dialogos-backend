@@ -1072,6 +1072,23 @@ def remove_post_reaction(post_id: str, body: ReactPostRequest,
     ws_emit("update_post", {"id": post_id, "feed": post["feed"], "reactions": reactions}, rooms=[f"feed:{post['feed']}", "all"])
     return {"reactions": reactions}
 
+@app.put("/api/posts/{post_id}")
+def update_post(post_id: str, body: dict, user=Depends(get_current_user), db=Depends(get_db)):
+    post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado.")
+    if post["author_key"] != user["key"]:
+        raise HTTPException(status_code=403, detail="Você não pode editar este post.")
+
+    text = body.get("text")
+    if text is not None:
+        text = _sanitize_text(text.strip())[:10000]
+        db.execute("UPDATE posts SET text=%s WHERE id=%s", (text, post_id))
+
+    db.commit()
+    ws_emit("update_post", {"id": post_id, "feed": post["feed"], "text": text}, rooms=[f"feed:{post['feed']}", "all"])
+    return {"ok": True, "text": text}
+
 @app.post("/api/posts/{post_id}/comment")
 def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_user), db=Depends(get_db)):
     post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
