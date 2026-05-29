@@ -96,6 +96,7 @@ def init_db():
         _safe_add_column(c, 'posts', 'author_role', "author_role TEXT DEFAULT ''")
         _safe_add_column(c, 'posts', 'author_is_rh', "author_is_rh INTEGER DEFAULT 0")
         _safe_add_column(c, 'posts', 'author_is_admin', "author_is_admin INTEGER DEFAULT 0")
+        _safe_add_column(c, 'posts', 'reactions', "reactions TEXT DEFAULT '{}'")
 
         _safe_add_column(c, 'users', 'is_orcoma', "is_orcoma INTEGER DEFAULT 0")
         _safe_add_column(c, 'users', 'hire_date', "hire_date TEXT DEFAULT ''")
@@ -489,6 +490,18 @@ def init_db():
         _safe_add_column(c, 'ratimbum_posts', 'is_celebration', "is_celebration INTEGER DEFAULT 1")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_created ON ratimbum_posts(created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_reactions_post ON ratimbum_reactions(post_id)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS post_reactions (
+                id TEXT PRIMARY KEY,
+                post_id TEXT NOT NULL,
+                user_key TEXT NOT NULL,
+                emoji TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(post_id, user_key, emoji)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_post_reactions_post ON post_reactions(post_id)")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS events (

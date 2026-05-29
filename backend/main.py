@@ -768,6 +768,7 @@ def get_posts(feed: str = "feed", limit: int = 20, offset: int = 0,
         d = dict(r)
         d["likes"] = json.loads(d.get("likes") or "[]")
         d["comments"] = json.loads(d.get("comments") or "[]")
+        d["reactions"] = json.loads(d.get("reactions") or "{}")
         result.append(d)
     return {"posts": result, "total": total}
 
@@ -993,6 +994,83 @@ def toggle_like(post_id: str, user=Depends(get_current_user), db=Depends(get_db)
     db.commit()
     ws_emit("update_post", {"id": post_id, "feed": post["feed"], "likes": likes}, rooms=[f"feed:{post['feed']}", "all"])
     return {"likes": likes}
+
+@app.post("/api/posts/{post_id}/react")
+def add_post_reaction(post_id: str, body: ReactPostRequest,
+                      user=Depends(get_current_user), db=Depends(get_db)):
+    post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado.")
+
+    emoji = body.emoji.strip()
+    if not emoji:
+        raise HTTPException(status_code=400, detail="Emoji inválido.")
+
+    existing = db.execute(
+        "SELECT id FROM post_reactions WHERE post_id=%s AND user_key=%s AND emoji=%s",
+        (post_id, user["key"], emoji)
+    ).fetchone()
+    if existing:
+        raise HTTPException(status_code=409, detail="Você já reagiu com este emoji.")
+
+    reaction_id = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO post_reactions (id, post_id, user_key, emoji, created_at) VALUES (%s,%s,%s,%s,%s)",
+        (reaction_id, post_id, user["key"], emoji, datetime.datetime.utcnow().isoformat())
+    )
+
+    reactions = json.loads(post.get("reactions") or "{}")
+    reactions.setdefault(emoji, [])
+    if user["key"] not in reactions[emoji]:
+        reactions[emoji].append(user["key"])
+    db.execute("UPDATE posts SET reactions=%s WHERE id=%s",
+               (json.dumps(reactions), post_id))
+
+    if post["author_key"] != user["key"]:
+        _notify(db, title=f"{emoji} Reação",
+                message=f"{user['name']} reagiu com {emoji} à sua publicação",
+                ntype="post", target_user_key=post["author_key"],
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=post_id, play_sound=False)
+
+    db.commit()
+    ws_emit("update_post", {"id": post_id, "feed": post["feed"], "reactions": reactions}, rooms=[f"feed:{post['feed']}", "all"])
+    return {"reactions": reactions}
+
+@app.delete("/api/posts/{post_id}/react")
+def remove_post_reaction(post_id: str, body: ReactPostRequest,
+                         user=Depends(get_current_user), db=Depends(get_db)):
+    post = db.execute("SELECT * FROM posts WHERE id=%s", (post_id,)).fetchone()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post não encontrado.")
+
+    emoji = body.emoji.strip()
+    if not emoji:
+        raise HTTPException(status_code=400, detail="Emoji inválido.")
+
+    existing = db.execute(
+        "SELECT id FROM post_reactions WHERE post_id=%s AND user_key=%s AND emoji=%s",
+        (post_id, user["key"], emoji)
+    ).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Reação não encontrada.")
+
+    db.execute("DELETE FROM post_reactions WHERE id=%s", (existing["id"],))
+
+    reactions = json.loads(post.get("reactions") or "{}")
+    users_list = reactions.get(emoji, [])
+    if user["key"] in users_list:
+        users_list.remove(user["key"])
+    if not users_list:
+        reactions.pop(emoji, None)
+    else:
+        reactions[emoji] = users_list
+    db.execute("UPDATE posts SET reactions=%s WHERE id=%s",
+               (json.dumps(reactions), post_id))
+
+    db.commit()
+    ws_emit("update_post", {"id": post_id, "feed": post["feed"], "reactions": reactions}, rooms=[f"feed:{post['feed']}", "all"])
+    return {"reactions": reactions}
 
 @app.post("/api/posts/{post_id}/comment")
 def add_comment(post_id: str, body: CommentRequest, user=Depends(get_current_user), db=Depends(get_db)):
