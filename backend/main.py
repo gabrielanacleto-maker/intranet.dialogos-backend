@@ -3903,6 +3903,11 @@ def concluir_objetivo(oid: str, body: dict = None, user=Depends(get_current_user
     db.commit()
     ws_emit_to_user(user["key"], "objective_completed",
                     {"id": oid, "user_key": user["key"], "status": "concluido", "progresso": objetivo["meta_valor"], "nome": objetivo["nome"]})
+    _notify(db, title="🎯 Objetivo concluído",
+            message=f"{user['name']} concluiu o objetivo: {objetivo['nome']}",
+            ntype="achievement",
+            sender_key=user["key"], sender_name=user["name"],
+            play_sound=False)
     return {"ok": True}
 
 @app.post("/api/objetivos/{oid}/incrementar")
@@ -5060,8 +5065,7 @@ def get_notifications_v2(
     conditions = ["(n.target_user_key = %s OR n.audience = 'all' OR n.audience = %s)"]
     params = [user["key"], user.get("dept", "")]
 
-    conditions.append("n.type IN %s")
-    params.append(('comunicado', 'dcash', 'celebration'))
+
 
     if type:
         conditions.append("n.type = %s")
