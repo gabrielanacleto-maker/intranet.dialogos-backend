@@ -1672,6 +1672,23 @@ def create_evaluation(body: dict, user=Depends(get_current_user), db=Depends(get
 
 # ── COLLEAGUE FEEDBACK (LinkedIn-style) ───────────────────────────────────────
 
+@app.get("/api/colleague-feedback")
+def list_colleague_feedback(limit: int = 50, offset: int = 0,
+                            user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute(
+        "SELECT * FROM colleague_feedback ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        (limit, offset)
+    ).fetchall()
+    total = db.execute("SELECT COUNT(*) FROM colleague_feedback").fetchone()["count"]
+    result = []
+    for r in rows:
+        entry = dict(r)
+        entry["reactions"] = json.loads(entry.get("reactions") or "{}")
+        can_delete = user["key"] == entry["author_key"] or user.get("is_admin")
+        entry["can_delete"] = can_delete
+        result.append(entry)
+    return {"items": result, "total": total}
+
 @app.get("/api/colleague-feedback/{target_key}")
 def get_colleague_feedback(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute(
@@ -1689,26 +1706,50 @@ def get_colleague_feedback(target_key: str, user=Depends(get_current_user), db=D
 
 @app.post("/api/colleague-feedback")
 def create_colleague_feedback(body: dict, user=Depends(get_current_user), db=Depends(get_db)):
-    target_key = body.get("target_user_key", "")
+    target_key = body.get("target_user_key") or body.get("target_key", "")
     text = body.get("text", "").strip()[:6000]
+    rating = body.get("rating")
     if not text:
         raise HTTPException(status_code=400, detail="Feedback não pode ser vazio.")
-    if user["key"] == target_key:
-        raise HTTPException(status_code=400, detail="Você não pode avaliar a si mesmo.")
-
-    target = db.execute("SELECT 1 FROM users WHERE key=%s", (target_key,)).fetchone()
-    if not target:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    if not target_key:
+        raise HTTPException(status_code=400, detail="Destinatário do feedback não informado.")
 
     fid = str(uuid.uuid4())
     now = datetime.datetime.utcnow().isoformat()
-    db.execute(
-        "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, reactions, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
-        (fid, target_key, user["key"], text, "{}", now)
-    )
-    log_audit(db, user["key"], "colleague_feedback_create", target_key, f"Feedback de {user['name']}")
-    _auto_concluir_feedback(db, user)
 
+    is_todos = target_key == "todos" or target_key == "@todos"
+
+    if is_todos:
+        if user["key"] == "system":
+            raise HTTPException(status_code=400, detail="Operação inválida.")
+        db.execute(
+            "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, reactions, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (fid, "@todos", user["key"], text, "{}", now)
+        )
+        log_audit(db, user["key"], "colleague_feedback_create", "@todos", f"Feedback para o time de {user['name']}")
+        _notify(db, title="💬 Feedback para o time",
+                message=f"{user['name']} enviou um feedback para @todos",
+                ntype="celebration", audience="all",
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=fid, play_sound=False)
+    else:
+        if user["key"] == target_key:
+            raise HTTPException(status_code=400, detail="Você não pode avaliar a si mesmo.")
+        target = db.execute("SELECT 1 FROM users WHERE key=%s", (target_key,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        db.execute(
+            "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, rating, reactions, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (fid, target_key, user["key"], text, rating, "{}", now)
+        )
+        log_audit(db, user["key"], "colleague_feedback_create", target_key, f"Feedback de {user['name']}")
+        _notify(db, title="💬 Feedback recebido",
+                message=f"{user['name']} enviou um feedback para você",
+                ntype="feedback", target_user_key=target_key,
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=fid, play_sound=False)
+
+    _auto_concluir_feedback(db, user)
     db.commit()
     return {"ok": True, "id": fid}
 
