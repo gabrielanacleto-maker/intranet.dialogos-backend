@@ -28,3 +28,7 @@ INFO:     connection open
 INFO:     connection closed
 INFO:     ('127.0.0.1', 52712) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
 INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 43614) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open
+INFO:     connection closed
