@@ -103,6 +103,52 @@ def init_db():
         _safe_add_column(c, 'users', 'org_position', "org_position TEXT DEFAULT 'colaborador'")
         _safe_add_column(c, 'users', 'manager_key', "manager_key TEXT DEFAULT NULL")
         _safe_add_column(c, 'users', 'nivel_dourado', "nivel_dourado INTEGER DEFAULT 0")
+        _safe_add_column(c, 'users', 'desligado', "desligado INTEGER DEFAULT 0")
+        _safe_add_column(c, 'users', 'desligado_data', "desligado_data TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'desligamento_motivo', "desligamento_motivo TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'desligamento_obs', "desligamento_obs TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'cargo_id', "cargo_id TEXT DEFAULT NULL")
+        _safe_add_column(c, 'users', 'senioridade', "senioridade TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'empresa_id', "empresa_id TEXT DEFAULT NULL")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS cargos (
+                id TEXT PRIMARY KEY,
+                nome TEXT NOT NULL,
+                nivel INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT ''
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS cargos_gerais (
+                id TEXT PRIMARY KEY,
+                nome TEXT NOT NULL,
+                created_at TEXT DEFAULT ''
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS empresas (
+                id TEXT PRIMARY KEY,
+                nome TEXT NOT NULL,
+                cnpj TEXT DEFAULT '',
+                socios TEXT DEFAULT '',
+                endereco TEXT DEFAULT '',
+                logo TEXT DEFAULT '',
+                created_at TEXT DEFAULT ''
+            )
+        """)
+
+        c.execute("""INSERT INTO empresas (id, nome, cnpj, socios, endereco, logo, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING""",
+            ('dialogos', 'Clínica Diálogos', '', '', '', '', '2026-01-01T00:00:00'))
+        c.execute("""INSERT INTO empresas (id, nome, cnpj, socios, endereco, logo, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING""",
+            ('orcoma', 'Orcoma Contabilidade', '', '', '', '', '2026-01-01T00:00:00'))
+
+        c.execute("UPDATE users SET empresa_id='orcoma' WHERE is_orcoma=1 AND (empresa_id IS NULL OR empresa_id='')")
+        c.execute("UPDATE users SET empresa_id='dialogos' WHERE is_orcoma=0 AND (empresa_id IS NULL OR empresa_id='')")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS post_views (
@@ -363,59 +409,6 @@ def init_db():
         """)
 
         c.execute("""
-            CREATE TABLE IF NOT EXISTS objetivos_def (
-                id TEXT PRIMARY KEY,
-                nome TEXT NOT NULL,
-                descricao TEXT DEFAULT '',
-                categoria TEXT NOT NULL DEFAULT 'tarefas',
-                recompensa_dcoins INTEGER NOT NULL DEFAULT 10,
-                meta_valor INTEGER NOT NULL DEFAULT 1,
-                meta_unidade TEXT NOT NULL DEFAULT 'tarefas',
-                periodicidade TEXT NOT NULL DEFAULT 'diaria',
-                tipo_progresso TEXT NOT NULL DEFAULT 'incremental',
-                icone TEXT NOT NULL DEFAULT 'ti-star',
-                ativo INTEGER NOT NULL DEFAULT 1,
-                owner_key TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS objetivos_progress (
-                id TEXT PRIMARY KEY,
-                objetivo_id TEXT NOT NULL,
-                user_key TEXT NOT NULL,
-                progresso_atual INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'pendente',
-                ultimo_reset TEXT,
-                ultima_atualizacao TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (objetivo_id) REFERENCES objetivos_def(id)
-            )
-        """)
-        _safe_add_column(c, 'objetivos_progress', 'ultimo_reset', "ultimo_reset TEXT")
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS objetivos_audit_log (
-                id TEXT PRIMARY KEY,
-                objetivo_id TEXT NOT NULL,
-                user_key TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT DEFAULT '',
-                ip_address TEXT DEFAULT '',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (objetivo_id) REFERENCES objetivos_def(id)
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS objetivos_streaks (
-                id TEXT PRIMARY KEY,
-                user_key TEXT NOT NULL UNIQUE,
-                current_streak INTEGER NOT NULL DEFAULT 0,
-                max_streak INTEGER NOT NULL DEFAULT 0,
-                last_date TEXT,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        c.execute("""
             CREATE TABLE IF NOT EXISTS communications (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -530,6 +523,26 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_post_views_post ON post_views(post_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_ratimbum_posts_author ON ratimbum_posts(author_key)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user_comm ON communication_reads(user_key, communication_id)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS pdis (
+                id TEXT PRIMARY KEY,
+                user_key TEXT NOT NULL,
+                titulo TEXT NOT NULL,
+                descricao TEXT DEFAULT '',
+                data_inicio TEXT NOT NULL,
+                data_fim TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ativo',
+                data_conclusao TEXT DEFAULT '',
+                justificativa_expiracao TEXT DEFAULT '',
+                blocos TEXT DEFAULT '[]',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pdis_user ON pdis(user_key)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pdis_status ON pdis(status)")
 
         conn.commit()
         print("Banco de dados inicializado.")

@@ -12,6 +12,24 @@ class ChangePasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     new_password: str
 
+class DesligarRequest(BaseModel):
+    motivo: str = ""
+    obs: str = ""
+
+class CargoRequest(BaseModel):
+    nome: str
+    nivel: int = 0
+
+class CargoGeralRequest(BaseModel):
+    nome: str
+
+class EmpresaRequest(BaseModel):
+    nome: str
+    cnpj: str = ""
+    socios: str = ""
+    endereco: str = ""
+    logo: str = ""
+
 class CreateUserRequest(BaseModel):
     key: str
     name: str
@@ -33,6 +51,9 @@ class CreateUserRequest(BaseModel):
     org_position: Optional[str] = 'colaborador'
     is_orcoma: Optional[bool] = False
     nivel_dourado: Optional[bool] = False
+    cargo_id: Optional[str] = None
+    senioridade: Optional[str] = None
+    empresa_id: Optional[str] = None
 
 class UpdateUserRequest(BaseModel):
     name: str
@@ -53,6 +74,9 @@ class UpdateUserRequest(BaseModel):
     org_position: Optional[str] = 'colaborador'
     is_orcoma: Optional[bool] = False
     nivel_dourado: Optional[bool] = False
+    cargo_id: Optional[str] = None
+    senioridade: Optional[str] = None
+    empresa_id: Optional[str] = None
 
 class CreatePostRequest(BaseModel):
     feed: str = "feed"
@@ -244,3 +268,22 @@ class EventoRequest(BaseModel):
     data_inicio: str
     data_termino: str
     apng_url: Optional[str] = ''
+
+class PdiRequest(BaseModel):
+    user_key: str
+    titulo: str
+    descricao: str
+    data_inicio: str
+    data_fim: str
+    blocos: list = []
+    status: str = "ativo"
+
+class PdiUpdateRequest(BaseModel):
+    titulo: Optional[str] = None
+    descricao: Optional[str] = None
+    data_inicio: Optional[str] = None
+    data_fim: Optional[str] = None
+    status: Optional[str] = None
+    data_conclusao: Optional[str] = None
+    justificativa_expiracao: Optional[str] = None
+    blocos: Optional[list] = None

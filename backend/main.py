@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status, Request, Header, Query
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status, Request, Header, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
-import os, uuid, shutil, datetime, json, re, time
-from urllib.parse import urlparse, parse_qs
+import os, uuid, shutil, datetime, json, re, time, asyncio
+from urllib.parse import urlparse, parse_qs, quote
 from pathlib import Path
 import logging
 
@@ -34,8 +34,6 @@ TRUSTED_EMBED_DOMAINS = {"instagram.com", "tiktok.com", "youtube.com", "youtu.be
 _upload_limits = {}
 _birthday_limits = {}
 _activity_limits = {}
-_objective_limits = {}
-_idempotency_keys = {}
 logger = logging.getLogger("dialogos.security")
 
 def _check_upload_rate_limit(user_key: str):
@@ -203,6 +201,8 @@ def _is_executable(ext: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+        global _sio_loop
+        _sio_loop = asyncio.get_running_loop()
         init_db()
         yield
 
@@ -241,11 +241,22 @@ app.add_middleware(
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Socket.IO server (real-time updates without polling)
-sio = socketio.Server(
+sio = socketio.AsyncServer(
+    async_mode="asgi",
     cors_allowed_origins=origins,
     logger=False,
     engineio_logger=False,
 )
+
+_sio_loop = None
+
+def _schedule_sio_emit(coro):
+    if _sio_loop is None:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(coro, _sio_loop)
+    except Exception:
+        logger.exception("socket_emit_failed")
 
 def _extract_socket_token(environ, auth):
     if isinstance(auth, dict) and auth.get("token"):
@@ -281,10 +292,10 @@ def _presence_user_list():
     return sorted(_presence.values(), key=lambda u: u["name"].lower())
 
 def _emit_presence():
-    sio.emit("presence_update", {
+    _schedule_sio_emit(sio.emit("presence_update", {
         "online_count": len(_presence),
         "users": _presence_user_list(),
-    }, room="all")
+    }, room="all"))
 
 def _cleanup_stale_presence():
     now = time.time()
@@ -295,7 +306,7 @@ def _cleanup_stale_presence():
         _emit_presence()
 
 @sio.event
-def connect(sid, environ, auth=None):
+async def connect(sid, environ, auth=None):
     token = _extract_socket_token(environ, auth)
     if not token:
         raise ConnectionRefusedError("unauthorized")
@@ -307,7 +318,7 @@ def connect(sid, environ, auth=None):
         if not user_row:
             raise ConnectionRefusedError("unauthorized")
         user = dict(user_row)
-    sio.save_session(sid, {
+    await sio.save_session(sid, {
         "user_key": user["key"],
         "dept": user.get("dept", ""),
         "name": user["name"],
@@ -316,10 +327,10 @@ def connect(sid, environ, auth=None):
         "photo_url": user.get("photo_url", ""),
         "role": user.get("role", ""),
     })
-    sio.enter_room(sid, "all")
-    sio.enter_room(sid, f"user:{user['key']}")
+    await sio.enter_room(sid, "all")
+    await sio.enter_room(sid, f"user:{user['key']}")
     if user.get("dept"):
-        sio.enter_room(sid, f"dept:{user['dept']}")
+        await sio.enter_room(sid, f"dept:{user['dept']}")
     user_key = user["key"]
     now = time.time()
     if user_key in _presence:
@@ -339,9 +350,9 @@ def connect(sid, environ, auth=None):
     _emit_presence()
 
 @sio.event
-def disconnect(sid):
+async def disconnect(sid):
     try:
-        session = sio.get_session(sid)
+        session = await sio.get_session(sid)
     except Exception:
         session = None
     if session and session.get("user_key"):
@@ -354,9 +365,9 @@ def disconnect(sid):
         _emit_presence()
 
 @sio.event
-def ping(sid):
+async def ping(sid):
     try:
-        session = sio.get_session(sid)
+        session = await sio.get_session(sid)
     except Exception:
         session = None
     if session and session.get("user_key"):
@@ -366,30 +377,30 @@ def ping(sid):
     _cleanup_stale_presence()
 
 @sio.event
-def join(sid, data):
+async def join(sid, data):
     room = (data or {}).get("room")
     if room:
-        sio.enter_room(sid, room)
+        await sio.enter_room(sid, room)
 
 @sio.event
-def leave(sid, data):
+async def leave(sid, data):
     room = (data or {}).get("room")
     if room:
-        sio.leave_room(sid, room)
+        await sio.leave_room(sid, room)
 
 def ws_emit(event: str, payload: dict, rooms=None):
     try:
         if rooms:
             for room in rooms:
-                sio.emit(event, payload, room=room)
+                _schedule_sio_emit(sio.emit(event, payload, room=room))
             return
-        sio.emit(event, payload, room="all")
+        _schedule_sio_emit(sio.emit(event, payload, room="all"))
     except Exception:
         logger.exception("socket_emit_failed event=%s", event)
 
 def ws_emit_to_user(user_key: str, event: str, payload: dict):
     try:
-        sio.emit(event, payload, room=f"user:{user_key}")
+        _schedule_sio_emit(sio.emit(event, payload, room=f"user:{user_key}"))
     except Exception:
         logger.exception("socket_emit_to_user_failed event=%s user=%s", event, user_key)
 
@@ -404,6 +415,8 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
         cached = _get_user_cache(payload["sub"])
         if cached:
+            if cached.get("desligado"):
+                raise HTTPException(status_code=403, detail="Usuário desligado.")
             return cached
 
         with get_db_context() as db:
@@ -411,6 +424,8 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             if not user_row:
                 raise HTTPException(status_code=401, detail="Usuário não encontrado")
             user_data = dict(user_row)
+            if user_data.get("desligado"):
+                raise HTTPException(status_code=403, detail="Usuário desligado.")
             _set_user_cache(payload["sub"], user_data)
             return user_data
 
@@ -428,6 +443,8 @@ def get_current_user_from_token(token: str = Query(None), authorization: str = H
 
     cached = _get_user_cache(payload["sub"])
     if cached:
+        if cached.get("desligado"):
+            raise HTTPException(status_code=403, detail="Usuário desligado.")
         return cached
 
     with get_db_context() as db:
@@ -435,6 +452,8 @@ def get_current_user_from_token(token: str = Query(None), authorization: str = H
         if not user_row:
             raise HTTPException(status_code=401, detail="Usuário não encontrado")
         user_data = dict(user_row)
+        if user_data.get("desligado"):
+            raise HTTPException(status_code=403, detail="Usuário desligado.")
         _set_user_cache(payload["sub"], user_data)
         return user_data
 
@@ -517,12 +536,12 @@ def login(body: LoginRequest, db=Depends(get_db)):
         user = db.fetchone()
         if not user or not check_password(body.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
+        if user.get("desligado"):
+            raise HTTPException(status_code=403, detail="Conta desligada. Contate a administração.")
         token = create_token({"sub": user["key"], "level": user["access_level"]})
-        auto_concluiu = _auto_concluir_login(db, user)
         return {
             "token": token,
             "must_change_password": not user["password_changed"],
-            "auto_concluiu_login": auto_concluiu,
             "user": {
                 "key": user["key"], "name": user["name"], "initials": user["initials"],
                 "role": user["role"], "dept": user["dept"], "level": user["level"],
@@ -551,6 +570,10 @@ def auth_me(user=Depends(get_current_user)):
         "org_position": user.get("org_position", "colaborador"),
         "points": user["points"], "photo_url": user["photo_url"],
         "password_changed": user["password_changed"],
+        "hire_date": user.get("hire_date", ""),
+        "cargo_id": user.get("cargo_id"),
+        "senioridade": user.get("senioridade", ""),
+        "empresa_id": user.get("empresa_id"),
     }
 
 @app.post("/api/auth/change-password")
@@ -569,7 +592,7 @@ def change_password(body: ChangePasswordRequest, user=Depends(get_current_user),
 
 @app.get("/api/users")
 def list_users(user=Depends(get_current_user), db=Depends(get_db)):
-        rows = db.execute("SELECT * FROM users ORDER BY name").fetchall()
+        rows = db.execute("SELECT * FROM users WHERE desligado=0 ORDER BY name").fetchall()
         result = []
         for r in rows:
             d = dict(r)
@@ -594,15 +617,18 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
         db.execute("""INSERT INTO users
             (key, name, initials, role, dept, level, color, access_level,
             is_admin, is_admin_user, is_rh, is_ouvidor, is_diretor, is_leader, nivel_dourado, points,
-            password_hash, password_changed, photo_url)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s)""",
+            password_hash, password_changed, photo_url, hire_date, org_position, is_orcoma, cargo_id, senioridade, empresa_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s)""",
             (key, body.name, body.initials, body.role, body.dept,
             body.level, body.color, body.access_level,
             1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
             1 if body.is_diretor else 0, 1 if body.is_leader else 0,
             1 if body.nivel_dourado else 0,
-            body.points, hash_password(body.password), "")
+            body.points, hash_password(body.password), "",
+            body.hire_date or "", body.org_position or 'colaborador', 1 if body.is_orcoma else 0,
+            body.cargo_id or None, body.senioridade or '',
+            body.empresa_id or ('orcoma' if body.is_orcoma else 'dialogos'))
         )
         db.commit()
         log_action(db, user["key"], key, "Criação de Usuário", f"Criou usuário {body.name}")
@@ -633,17 +659,29 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
                 raise HTTPException(status_code=403, detail="Apenas Admin Server (nível 3) pode definir nível 2 ou superior.")
             if body.is_admin or body.is_admin_user:
                 raise HTTPException(status_code=403, detail="Apenas Admin Server (nível 3) pode conceder permissões de admin.")
-        db.execute("""UPDATE users SET name=%s, initials=%s, role=%s, dept=%s, level=%s,
-            color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, nivel_dourado=%s, points=%s
-            WHERE key=%s""",
-            (body.name, body.initials, body.role, body.dept, body.level,
+        set_clause = """UPDATE users SET name=%s, initials=%s, role=%s, dept=%s, level=%s,
+            color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, nivel_dourado=%s, points=%s,
+            hire_date=%s, org_position=%s, is_orcoma=%s"""
+        params = [body.name, body.initials, body.role, body.dept, body.level,
             body.color, body.access_level,
             1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
             1 if body.is_diretor else 0, 1 if body.is_leader else 0,
             1 if body.nivel_dourado else 0,
-            body.points, target_key)
-        )
+            body.points,
+            body.hire_date or "", body.org_position or 'colaborador', 1 if body.is_orcoma else 0]
+        if body.cargo_id is not None:
+            set_clause += ", cargo_id=%s"
+            params.append(body.cargo_id or None)
+        if body.senioridade is not None:
+            set_clause += ", senioridade=%s"
+            params.append(body.senioridade or '')
+        if body.empresa_id is not None:
+            set_clause += ", empresa_id=%s"
+            params.append(body.empresa_id or None)
+        set_clause += " WHERE key=%s"
+        params.append(target_key)
+        db.execute(set_clause, params)
         db.commit()
         _invalidate_user_cache(target_key)
         if user["key"] != target_key:
@@ -675,6 +713,377 @@ def delete_user(target_key: str, user=Depends(require_level(2)), db=Depends(get_
     db.commit()
     _invalidate_user_cache(target_key)
     log_action(db, user["key"], target_key, "Exclusão de Usuário", f"Removeu {target['name']}")
+    return {"ok": True}
+
+DESLIGAMENTO_MOTIVOS = [
+    "Baixa Produtividade",
+    "Redução do Quadro",
+    "Reestruturação organizacional",
+    "Incompatibilidade cultural",
+    "Problemas de conduta",
+    "Pedido de demissão",
+    "Fim de contrato",
+    "Aposentadoria",
+    "Relocação geográfica",
+    "Conflito interpessoal",
+]
+
+@app.post("/api/users/{target_key}/desligar")
+def desligar_user(target_key: str, body: DesligarRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    if target_key == user["key"]:
+        raise HTTPException(status_code=403, detail="Você não pode desligar a si mesmo.")
+    if user["access_level"] < 3 and target["access_level"] >= user["access_level"]:
+        raise HTTPException(status_code=403, detail="Regra de ouro violada.")
+    if target.get("desligado"):
+        raise HTTPException(status_code=400, detail="Colaborador já está desligado.")
+    motivo = (body.motivo or "").strip()
+    if not motivo:
+        raise HTTPException(status_code=400, detail="Selecione o motivo do desligamento.")
+    if motivo not in DESLIGAMENTO_MOTIVOS:
+        raise HTTPException(status_code=400, detail="Motivo de desligamento inválido.")
+    obs = (body.obs or "").strip()
+    if len(obs) > 6000:
+        raise HTTPException(status_code=400, detail="Observações excedem o limite de 6000 caracteres.")
+    today = datetime.date.today().isoformat()
+    db.execute("UPDATE users SET desligado=1, desligado_data=%s, desligamento_motivo=%s, desligamento_obs=%s WHERE key=%s",
+        (today, motivo, obs, target_key))
+    db.commit()
+    _invalidate_user_cache(target_key)
+    log_action(db, user["key"], target_key, "Desligamento de Usuário", f"Desligou {target['name']} — {motivo}")
+    return {"ok": True}
+
+@app.get("/api/users/desligados")
+def list_users_desligados(user=Depends(require_level(2)), db=Depends(get_db)):
+    rows = db.execute("SELECT * FROM users WHERE desligado=1 ORDER BY desligado_data DESC, name").fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d.pop("password_hash", None)
+        d.pop("password_changed", None)
+        result.append(d)
+    return result
+
+@app.post("/api/users/{target_key}/readmitir")
+def readmitir_user(target_key: str, user=Depends(require_level(2)), db=Depends(get_db)):
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    if not target.get("desligado"):
+        raise HTTPException(status_code=400, detail="Colaborador não está desligado.")
+    db.execute("UPDATE users SET desligado=0, desligado_data='' WHERE key=%s", (target_key,))
+    db.commit()
+    _invalidate_user_cache(target_key)
+    log_action(db, user["key"], target_key, "Readmissão de Usuário", f"Readmitiu {target['name']}")
+    return {"ok": True}
+
+@app.get("/api/cargos")
+def list_cargos(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""
+        SELECT c.id, c.nome, c.nivel,
+               (SELECT COUNT(*) FROM users u WHERE u.cargo_id = c.id AND u.desligado = 0) AS usuarios
+        FROM cargos c
+        ORDER BY c.nivel ASC, c.nome ASC
+    """).fetchall()
+    return [{"id": r["id"], "nome": r["nome"], "nivel": r["nivel"], "usuarios": r["usuarios"] or 0} for r in rows]
+
+@app.post("/api/cargos")
+def create_cargo(body: CargoRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    nome = body.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=400, detail="Nome do cargo é obrigatório.")
+    cargo_id = re.sub(r'[^a-z0-9]+', '-', nome.lower()).strip('-') or "cargo"
+    base = cargo_id
+    n = 1
+    while db.execute("SELECT 1 FROM cargos WHERE id=%s", (cargo_id,)).fetchone():
+        cargo_id = f"{base}-{n}"
+        n += 1
+    db.execute("INSERT INTO cargos (id, nome, nivel, created_at) VALUES (%s,%s,%s,%s)",
+               (cargo_id, nome, body.nivel, datetime.datetime.utcnow().isoformat()))
+    db.commit()
+    log_action(db, user["key"], cargo_id, "Criação de Cargo", f"Criou o cargo {nome}")
+    return {"id": cargo_id, "ok": True}
+
+@app.put("/api/cargos/{cargo_id}")
+def update_cargo(cargo_id: str, body: CargoRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM cargos WHERE id=%s", (cargo_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Cargo não encontrado.")
+    nome = body.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=400, detail="Nome do cargo é obrigatório.")
+    db.execute("UPDATE cargos SET nome=%s, nivel=%s WHERE id=%s", (nome, body.nivel, cargo_id))
+    db.commit()
+    log_action(db, user["key"], cargo_id, "Atualização de Cargo", f"Atualizou o cargo para {nome}")
+    return {"ok": True}
+
+@app.delete("/api/cargos/{cargo_id}")
+def delete_cargo(cargo_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM cargos WHERE id=%s", (cargo_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Cargo não encontrado.")
+    affected = db.execute("SELECT key FROM users WHERE cargo_id=%s", (cargo_id,)).fetchall()
+    db.execute("UPDATE users SET cargo_id=NULL WHERE cargo_id=%s", (cargo_id,))
+    db.execute("DELETE FROM cargos WHERE id=%s", (cargo_id,))
+    db.commit()
+    for u in affected:
+        _invalidate_user_cache(u["key"])
+    log_action(db, user["key"], cargo_id, "Exclusão de Cargo", f"Excluiu o cargo {row['nome']}")
+    return {"ok": True}
+
+# ── CARGOS GERAIS ────────────────────────────────────────────────────────────
+
+@app.get("/api/cargos-gerais")
+def list_cargos_gerais(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""
+        SELECT c.id, c.nome,
+               (SELECT COUNT(*) FROM users u WHERE u.role = c.nome AND u.desligado = 0) AS usuarios
+        FROM cargos_gerais c
+        ORDER BY c.nome ASC
+    """).fetchall()
+    return [{"id": r["id"], "nome": r["nome"], "usuarios": r["usuarios"] or 0} for r in rows]
+
+@app.post("/api/cargos-gerais")
+def create_cargo_geral(body: CargoGeralRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    nome = body.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=400, detail="Nome do cargo é obrigatório.")
+    cargo_id = re.sub(r'[^a-z0-9]+', '-', nome.lower()).strip('-') or "cargo-geral"
+    base = cargo_id
+    n = 1
+    while db.execute("SELECT 1 FROM cargos_gerais WHERE id=%s", (cargo_id,)).fetchone():
+        cargo_id = f"{base}-{n}"
+        n += 1
+    db.execute("INSERT INTO cargos_gerais (id, nome, created_at) VALUES (%s,%s,%s)",
+               (cargo_id, nome, datetime.datetime.utcnow().isoformat()))
+    db.commit()
+    log_action(db, user["key"], cargo_id, "Criação de Cargo Geral", f"Criou o cargo geral {nome}")
+    return {"id": cargo_id, "ok": True}
+
+@app.put("/api/cargos-gerais/{cargo_id}")
+def update_cargo_geral(cargo_id: str, body: CargoGeralRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM cargos_gerais WHERE id=%s", (cargo_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Cargo geral não encontrado.")
+    nome = body.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=400, detail="Nome do cargo é obrigatório.")
+    db.execute("UPDATE cargos_gerais SET nome=%s WHERE id=%s", (nome, cargo_id))
+    db.commit()
+    log_action(db, user["key"], cargo_id, "Atualização de Cargo Geral", f"Atualizou o cargo geral para {nome}")
+    return {"ok": True}
+
+@app.delete("/api/cargos-gerais/{cargo_id}")
+def delete_cargo_geral(cargo_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM cargos_gerais WHERE id=%s", (cargo_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Cargo geral não encontrado.")
+    db.execute("DELETE FROM cargos_gerais WHERE id=%s", (cargo_id,))
+    db.commit()
+    log_action(db, user["key"], cargo_id, "Exclusão de Cargo Geral", f"Excluiu o cargo geral {row['nome']}")
+    return {"ok": True}
+
+# ── EMPRESAS ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/empresas")
+def list_empresas(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""
+        SELECT e.id, e.nome, e.cnpj, e.socios, e.endereco, e.logo,
+               (SELECT COUNT(*) FROM users u WHERE u.empresa_id = e.id AND u.desligado = 0) AS colaboradores
+        FROM empresas e
+        ORDER BY e.nome ASC
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/empresas")
+def create_empresa(body: EmpresaRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    nome = body.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=400, detail="Nome da empresa é obrigatório.")
+    empresa_id = re.sub(r'[^a-z0-9]+', '-', nome.lower()).strip('-') or "empresa"
+    base = empresa_id
+    n = 1
+    while db.execute("SELECT 1 FROM empresas WHERE id=%s", (empresa_id,)).fetchone():
+        empresa_id = f"{base}-{n}"
+        n += 1
+    db.execute("""INSERT INTO empresas (id, nome, cnpj, socios, endereco, logo, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+        (empresa_id, nome, body.cnpj, body.socios, body.endereco, body.logo, datetime.datetime.utcnow().isoformat()))
+    db.commit()
+    log_action(db, user["key"], empresa_id, "Criação de Empresa", f"Criou a empresa {nome}")
+    return {"id": empresa_id, "ok": True}
+
+@app.put("/api/empresas/{empresa_id}")
+def update_empresa(empresa_id: str, body: EmpresaRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM empresas WHERE id=%s", (empresa_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Empresa não encontrada.")
+    nome = body.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=400, detail="Nome da empresa é obrigatório.")
+    db.execute("UPDATE empresas SET nome=%s, cnpj=%s, socios=%s, endereco=%s, logo=%s WHERE id=%s",
+               (nome, body.cnpj, body.socios, body.endereco, body.logo, empresa_id))
+    db.commit()
+    log_action(db, user["key"], empresa_id, "Atualização de Empresa", f"Atualizou a empresa {nome}")
+    return {"ok": True}
+
+@app.delete("/api/empresas/{empresa_id}")
+def delete_empresa(empresa_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM empresas WHERE id=%s", (empresa_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Empresa não encontrada.")
+    affected = db.execute("SELECT key FROM users WHERE empresa_id=%s", (empresa_id,)).fetchall()
+    db.execute("UPDATE users SET empresa_id=NULL WHERE empresa_id=%s", (empresa_id,))
+    db.execute("DELETE FROM empresas WHERE id=%s", (empresa_id,))
+    db.commit()
+    for u in affected:
+        _invalidate_user_cache(u["key"])
+    log_action(db, user["key"], empresa_id, "Exclusão de Empresa", f"Excluiu a empresa {row['nome']}")
+    return {"ok": True}
+
+@app.post("/api/empresas/{empresa_id}/logo")
+def upload_empresa_logo(empresa_id: str, file: UploadFile = File(...), user=Depends(require_level(2)), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM empresas WHERE id=%s", (empresa_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Empresa não encontrada.")
+    ext, _ = _validate_upload_file(file)
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Formato inválido. Use JPG, PNG ou WEBP.")
+    try:
+        unique_id = str(uuid.uuid4())
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="dialogos/empresas",
+            public_id=f"logo_{empresa_id}_{unique_id}",
+            overwrite=False
+        )
+        url = result["secure_url"]
+        db.execute("UPDATE empresas SET logo=%s WHERE id=%s", (url, empresa_id))
+        db.commit()
+        return {"url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── PDIs (Planos de Desenvolvimento Individual) ────────────────────────────────
+
+def _can_manage_pdi(db, user, target_user_key):
+    if user["access_level"] >= 2 or user["is_rh"] or user["is_admin"]:
+        return True
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_user_key,)).fetchone()
+    if not target:
+        return False
+    return target["key"] == user["key"]
+
+@app.get("/api/pdis/meus")
+def list_meus_pdis(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""
+        SELECT p.*, u.name as user_name, u.role as user_role
+        FROM pdis p
+        LEFT JOIN users u ON p.user_key = u.key
+        WHERE p.user_key = %s
+        ORDER BY p.created_at DESC
+    """, (user["key"],)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["blocos"] = json.loads(d.get("blocos") or "[]")
+        result.append(d)
+    return result
+
+@app.get("/api/pdis")
+def list_pdis(user=Depends(get_current_user), db=Depends(get_db)):
+    if user["access_level"] < 2 and not user.get("is_rh") and not user.get("is_admin"):
+        rows = db.execute("""
+            SELECT p.*, u.name as user_name, u.role as user_role
+            FROM pdis p
+            LEFT JOIN users u ON p.user_key = u.key
+            WHERE p.user_key = %s
+            ORDER BY p.created_at DESC
+        """, (user["key"],)).fetchall()
+    else:
+        rows = db.execute("""
+            SELECT p.*, u.name as user_name, u.role as user_role
+            FROM pdis p
+            LEFT JOIN users u ON p.user_key = u.key
+            ORDER BY p.created_at DESC
+        """).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["blocos"] = json.loads(d.get("blocos") or "[]")
+        result.append(d)
+    return result
+
+@app.post("/api/pdis")
+def create_pdi(body: PdiRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_manage_pdi(db, user, body.user_key):
+        raise HTTPException(status_code=403, detail="Sem permissão para criar PDI para este usuário.")
+    pdi_id = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute("""
+        INSERT INTO pdis (id, user_key, titulo, descricao, data_inicio, data_fim, status, blocos, created_by, created_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        pdi_id, body.user_key, body.titulo, body.descricao,
+        body.data_inicio, body.data_fim, body.status or "ativo",
+        json.dumps(body.blocos or []), user["key"], now, now
+    ))
+    db.commit()
+    log_action(db, user["key"], body.user_key, "Criação de PDI", f"Criou PDI '{body.titulo}' para {body.user_key}")
+    return {"id": pdi_id, "ok": True}
+
+@app.put("/api/pdis/{pdi_id}")
+def update_pdi(pdi_id: str, body: PdiUpdateRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM pdis WHERE id=%s", (pdi_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="PDI não encontrado.")
+    if not _can_manage_pdi(db, user, row["user_key"]):
+        raise HTTPException(status_code=403, detail="Sem permissão para editar este PDI.")
+    set_clause = "updated_at=%s"
+    params = [datetime.datetime.utcnow().isoformat()]
+    if body.titulo is not None:
+        set_clause += ", titulo=%s"
+        params.append(body.titulo)
+    if body.descricao is not None:
+        set_clause += ", descricao=%s"
+        params.append(body.descricao)
+    if body.data_inicio is not None:
+        set_clause += ", data_inicio=%s"
+        params.append(body.data_inicio)
+    if body.data_fim is not None:
+        set_clause += ", data_fim=%s"
+        params.append(body.data_fim)
+    if body.status is not None:
+        set_clause += ", status=%s"
+        params.append(body.status)
+    if body.data_conclusao is not None:
+        set_clause += ", data_conclusao=%s"
+        params.append(body.data_conclusao)
+    if body.justificativa_expiracao is not None:
+        set_clause += ", justificativa_expiracao=%s"
+        params.append(body.justificativa_expiracao)
+    if body.blocos is not None:
+        set_clause += ", blocos=%s"
+        params.append(json.dumps(body.blocos))
+    set_clause += " WHERE id=%s"
+    params.append(pdi_id)
+    db.execute(f"UPDATE pdis SET {set_clause}", params)
+    db.commit()
+    log_action(db, user["key"], row["user_key"], "Atualização de PDI", f"Atualizou PDI '{row['titulo']}'")
+    return {"ok": True}
+
+@app.delete("/api/pdis/{pdi_id}")
+def delete_pdi(pdi_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM pdis WHERE id=%s", (pdi_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="PDI não encontrado.")
+    if not _can_manage_pdi(db, user, row["user_key"]):
+        raise HTTPException(status_code=403, detail="Sem permissão para excluir este PDI.")
+    db.execute("DELETE FROM pdis WHERE id=%s", (pdi_id,))
+    db.commit()
+    log_action(db, user["key"], row["user_key"], "Exclusão de PDI", f"Excluiu PDI '{row['titulo']}'")
     return {"ok": True}
 
 @app.post("/api/users/me/photo")
@@ -785,9 +1194,7 @@ async def create_post(body: CreatePostRequest, user=Depends(get_current_user), d
                         user["level"] in ["platina", "diamante"])
             if not can_post:
                 raise HTTPException(status_code=403, detail="Sem permissão para publicar no Feed Novidades.")
-        if body.feed == "colaboradores":
-            pass  # All authenticated users can post
-        elif body.feed == "internal":
+        if body.feed == "internal":
             role = (user.get("role") or "").lower()
             can_post = (
                 user.get("is_admin") or user.get("is_admin_user") or
@@ -1693,7 +2100,14 @@ def create_evaluation(body: dict, user=Depends(get_current_user), db=Depends(get
 def list_colleague_feedback(limit: int = 50, offset: int = 0,
                             user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute(
-        "SELECT * FROM colleague_feedback ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        """SELECT cf.*,
+            u.name AS author_name,
+            u.initials AS author_initials,
+            u.color   AS author_color,
+            u.photo_url AS author_photo
+           FROM colleague_feedback cf
+           LEFT JOIN users u ON u.key = cf.author_key
+           ORDER BY cf.created_at DESC LIMIT %s OFFSET %s""",
         (limit, offset)
     ).fetchall()
     total = db.execute("SELECT COUNT(*) FROM colleague_feedback").fetchone()["count"]
@@ -1709,7 +2123,15 @@ def list_colleague_feedback(limit: int = 50, offset: int = 0,
 @app.get("/api/colleague-feedback/{target_key}")
 def get_colleague_feedback(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute(
-        "SELECT * FROM colleague_feedback WHERE target_user_key=%s ORDER BY created_at DESC LIMIT 50",
+        """SELECT cf.*,
+            u.name AS author_name,
+            u.initials AS author_initials,
+            u.color   AS author_color,
+            u.photo_url AS author_photo
+           FROM colleague_feedback cf
+           LEFT JOIN users u ON u.key = cf.author_key
+           WHERE cf.target_user_key=%s
+           ORDER BY cf.created_at DESC LIMIT 50""",
         (target_key,)
     ).fetchall()
     result = []
@@ -1766,7 +2188,6 @@ def create_colleague_feedback(body: dict, user=Depends(get_current_user), db=Dep
                 sender_key=user["key"], sender_name=user["name"],
                 reference_id=fid, play_sound=False)
 
-    _auto_concluir_feedback(db, user)
     db.commit()
     return {"ok": True, "id": fid}
 
@@ -2542,7 +2963,6 @@ def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user
     log_action(db, user["key"], user["key"], "Registro de Humor",
                f"valor_humor={body.valor_humor or mood_key} IP={ip}")
 
-    _auto_concluir_humor(db, user)
 
     return {"ok": True, "valor_humor": body.valor_humor or None}
 
@@ -3056,6 +3476,60 @@ def delete_pop_file(file_id: str, user=Depends(get_current_user), db=Depends(get
     db.commit()
     return {"ok": True}
 
+POP_MEDIA_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+    ".xml": "application/xml",
+    ".json": "application/json",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".mp4": "video/mp4",
+    ".mp3": "audio/mpeg",
+}
+
+def _pop_media_type(filename: str) -> str:
+    ext = Path(filename).suffix.lower()
+    return POP_MEDIA_TYPES.get(ext, "application/octet-stream")
+
+def _fetch_pop_bytes(url: str) -> bytes:
+    import httpx
+    try:
+        resp = httpx.get(url, follow_redirects=True, timeout=60)
+        resp.raise_for_status()
+        return resp.content
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao carregar o arquivo original: {str(e)}")
+
+def _pop_file_response(file_id: str, disposition: str, db) -> Response:
+    f = db.execute("SELECT * FROM pop_files WHERE id=%s", (file_id,)).fetchone()
+    if not f:
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    content = _fetch_pop_bytes(f["url"])
+    filename = f["name"] or "documento"
+    return Response(
+        content=content,
+        media_type=_pop_media_type(filename),
+        headers={"Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(filename, safe='')}"},
+    )
+
+@app.get("/api/pops-files/{file_id}/view")
+def view_pop_file(file_id: str, user=Depends(get_current_user_from_token), db=Depends(get_db)):
+    return _pop_file_response(file_id, "inline", db)
+
+@app.get("/api/pops-files/{file_id}/download")
+def download_pop_file(file_id: str, user=Depends(get_current_user_from_token), db=Depends(get_db)):
+    return _pop_file_response(file_id, "attachment", db)
+
 @app.post("/api/pops-files/{file_id}/replace")
 def replace_pop_file(
     file_id: str,
@@ -3467,645 +3941,7 @@ def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db
         "recent_points": [dict(h) for h in history]
     }
 
-# ── OBJETIVOS GAMIFICADOS (CRUD + PROGRESSO) ──────────────────────────────
 
-@app.get("/api/objetivos")
-def listar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute("SELECT * FROM objetivos_def ORDER BY created_at DESC").fetchall()
-    result = []
-    for row in rows:
-        d = dict(row)
-        prog = db.execute(
-            "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-            (d["id"], user["key"])
-        ).fetchone()
-        d["user_progress"] = dict(prog) if prog else None
-        result.append(d)
-    return result
-
-@app.post("/api/objetivos")
-def criar_objetivo(body: dict = None, user=Depends(get_current_user), db=Depends(get_db)):
-    if not user.get("is_admin") and not user.get("is_admin_user"):
-        raise HTTPException(status_code=403, detail="Apenas administradores podem criar objetivos.")
-    oid = str(uuid.uuid4())
-    now = datetime.datetime.utcnow().isoformat()
-    nome = (body or {}).get("nome", "").strip()
-    if not nome:
-        raise HTTPException(status_code=422, detail="Nome é obrigatório.")
-    db.execute(
-        """INSERT INTO objetivos_def (id, nome, descricao, categoria, recompensa_dcoins,
-           meta_valor, meta_unidade, periodicidade, tipo_progresso, icone, ativo, owner_key, created_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (oid, nome, (body or {}).get("descricao", ""),
-         (body or {}).get("categoria", "tarefas"),
-         (body or {}).get("recompensa_dcoins", 10),
-         (body or {}).get("meta_valor", 1),
-         (body or {}).get("meta_unidade", "tarefas"),
-         (body or {}).get("periodicidade", "diaria"),
-         (body or {}).get("tipo_progresso", "incremental"),
-         (body or {}).get("icone", "ti-star"),
-         1 if (body or {}).get("ativo", True) else 0,
-         user["key"], now)
-    )
-    db.commit()
-    return {"ok": True, "id": oid}
-
-@app.put("/api/objetivos/{oid}")
-def atualizar_objetivo(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db)):
-    if not user.get("is_admin") and not user.get("is_admin_user"):
-        raise HTTPException(status_code=403, detail="Apenas administradores podem editar objetivos.")
-    existing = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
-    if not existing:
-        raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
-    b = body or {}
-    updates = []
-    params = []
-    for col in ("nome", "descricao", "categoria", "recompensa_dcoins", "meta_valor",
-                "meta_unidade", "periodicidade", "tipo_progresso", "icone"):
-        if col in b:
-            updates.append(f"{col}=%s")
-            params.append(b[col])
-    if "ativo" in b:
-        updates.append("ativo=%s")
-        params.append(1 if b["ativo"] else 0)
-    if updates:
-        params.append(oid)
-        db.execute(f"UPDATE objetivos_def SET {', '.join(updates)} WHERE id=%s", params)
-        # Se foi desbloqueado (0→1), resetar progresso para zero
-        if b.get("ativo") and not existing.get("ativo"):
-            db.execute(
-                "UPDATE objetivos_progress SET progresso_atual=0, status='pendente', ultima_atualizacao=%s WHERE objetivo_id=%s",
-                (datetime.datetime.utcnow().isoformat(), oid)
-            )
-        db.commit()
-        ws_emit("objective_updated", {"type": "updated", "id": oid, "user_key": user["key"]})
-    return {"ok": True}
-
-@app.delete("/api/objetivos/{oid}")
-def deletar_objetivo(oid: str, user=Depends(get_current_user), db=Depends(get_db)):
-    if not user.get("is_admin") and not user.get("is_admin_user"):
-        raise HTTPException(status_code=403, detail="Apenas administradores podem remover objetivos.")
-    db.execute("DELETE FROM objetivos_progress WHERE objetivo_id=%s", (oid,))
-    db.execute("DELETE FROM objetivos_def WHERE id=%s", (oid,))
-    db.commit()
-    ws_emit("objective_updated", {"type": "deleted", "id": oid, "user_key": user["key"]})
-    return {"ok": True}
-
-def _check_objective_rate_limit(user_key: str):
-    now = time.time()
-    minute = int(now / 15)
-    key = f"obj:{user_key}:{minute}"
-    count = _objective_limits.get(key, 0)
-    if count >= 5:
-        raise HTTPException(status_code=429, detail="Limite de ações em objetivos excedido. Aguarde alguns segundos.")
-    _objective_limits[key] = count + 1
-
-def _log_objective_audit(db, objetivo_id, user_key, action, detail=""):
-    request = getattr(_log_objective_audit, "_request", None)
-    ip = ""
-    if request:
-        ip = request.client.host if hasattr(request, "client") and request.client else ""
-    db.execute(
-        "INSERT INTO objetivos_audit_log (id, objetivo_id, user_key, action, detail, ip_address, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-        (str(uuid.uuid4()), objetivo_id, user_key, action, detail, ip, datetime.datetime.utcnow().isoformat())
-    )
-
-def _update_streak(db, user_key):
-    hoje = datetime.datetime.utcnow().date().isoformat()
-    streak = db.execute("SELECT * FROM objetivos_streaks WHERE user_key=%s", (user_key,)).fetchone()
-    if streak:
-        if streak["last_date"] == hoje:
-            return streak["current_streak"]
-        yesterday = (datetime.datetime.utcnow().date() - datetime.timedelta(days=1)).isoformat()
-        if streak["last_date"] == yesterday:
-            novo = streak["current_streak"] + 1
-        else:
-            novo = 1
-        novo_max = max(novo, streak["max_streak"])
-        db.execute(
-            "UPDATE objetivos_streaks SET current_streak=%s, max_streak=%s, last_date=%s, updated_at=%s WHERE user_key=%s",
-            (novo, novo_max, hoje, datetime.datetime.utcnow().isoformat(), user_key)
-        )
-        return novo
-    else:
-        sid = str(uuid.uuid4())
-        now = datetime.datetime.utcnow().isoformat()
-        db.execute(
-            "INSERT INTO objetivos_streaks (id, user_key, current_streak, max_streak, last_date, updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
-            (sid, user_key, 1, 1, hoje, now)
-        )
-        return 1
-
-# ── Auto-concluir "Faça Login" no login ─────────────────────────────────────
-def _update_login_streak(db, user_key):
-    hoje = datetime.datetime.utcnow().date()
-    hoje_str = hoje.isoformat()
-    agora = datetime.datetime.utcnow().isoformat()
-    streak = db.execute("SELECT * FROM objetivos_streaks WHERE user_key=%s", (user_key,)).fetchone()
-    if streak:
-        if streak["last_date"] == hoje_str:
-            return streak["current_streak"]
-        last = datetime.date.fromisoformat(streak["last_date"])
-        delta = (hoje - last).days
-        only_weekends = True
-        for i in range(1, delta):
-            d = last + datetime.timedelta(days=i)
-            if d.weekday() < 5:
-                only_weekends = False
-                break
-        if delta == 1 or (delta > 1 and only_weekends):
-            novo = streak["current_streak"] + 1
-        else:
-            novo = 1
-        novo_max = max(novo, streak["max_streak"])
-        db.execute(
-            "UPDATE objetivos_streaks SET current_streak=%s, max_streak=%s, last_date=%s, updated_at=%s WHERE user_key=%s",
-            (novo, novo_max, hoje_str, agora, user_key)
-        )
-        return novo
-    sid = str(uuid.uuid4())
-    db.execute(
-        "INSERT INTO objetivos_streaks (id, user_key, current_streak, max_streak, last_date, updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
-        (sid, user_key, 1, 1, hoje_str, agora)
-    )
-    return 1
-
-def _auto_progress_tarefas(db, user_key):
-    hoje = datetime.datetime.utcnow().date().isoformat()
-    agora = datetime.datetime.utcnow().isoformat()
-    objetivos = db.execute(
-        "SELECT * FROM objetivos_def WHERE categoria='tarefas' AND ativo=1"
-    ).fetchall()
-    for obj in objetivos:
-        prog = db.execute(
-            "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-            (obj["id"], user_key)
-        ).fetchone()
-
-        if prog and prog["status"] == "concluido":
-            continue
-
-        if prog:
-            novo = (prog["progresso_atual"] or 0) + 1
-            status = "concluido" if novo >= obj["meta_valor"] else "progresso"
-            db.execute(
-                "UPDATE objetivos_progress SET progresso_atual=%s, status=%s, ultima_atualizacao=%s WHERE id=%s",
-                (novo, status, agora, prog["id"])
-            )
-        else:
-            pid = str(uuid.uuid4())
-            novo = 1
-            status = "concluido" if novo >= obj["meta_valor"] else "progresso"
-            db.execute(
-                "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                (pid, obj["id"], user_key, novo, status, hoje, agora, agora)
-            )
-
-        if status == "concluido":
-            _award_dcoins(db, user_key, obj["recompensa_dcoins"], f"Objetivo concluído: {obj['nome']}")
-            _update_streak(db, user_key)
-
-        ev = "objective_completed" if status == "concluido" else "objective_updated"
-        ws_emit_to_user(user_key, ev, {"id": obj["id"], "user_key": user_key, "status": status, "progresso": novo, "nome": obj["nome"]})
-
-def _auto_concluir_feedback(db, user):
-    hoje = datetime.datetime.utcnow().date().isoformat()
-    agora = datetime.datetime.utcnow().isoformat()
-    uk = user["key"]
-    obj = db.execute(
-        "SELECT * FROM objetivos_def WHERE nome ILIKE %s AND ativo=1",
-        ("%feedback%",)
-    ).fetchone()
-    if not obj:
-        return False
-    prog = db.execute(
-        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-        (obj["id"], uk)
-    ).fetchone()
-    if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje:
-        return False
-    if prog:
-        db.execute(
-            "UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
-            (obj["meta_valor"], agora, prog["id"])
-        )
-    else:
-        pid = str(uuid.uuid4())
-        db.execute(
-            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (pid, obj["id"], uk, obj["meta_valor"], "concluido", hoje, agora, agora)
-        )
-    _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Feedback dado: {obj['nome']}", notify=False)
-    _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
-    ws_emit_to_user(uk, "objective_completed",
-                    {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"], "nome": obj["nome"]})
-    return obj["nome"]
-
-def _auto_concluir_humor(db, user):
-    hoje = datetime.datetime.utcnow().date().isoformat()
-    agora = datetime.datetime.utcnow().isoformat()
-    uk = user["key"]
-    obj = db.execute(
-        "SELECT * FROM objetivos_def WHERE nome ILIKE %s AND ativo=1",
-        ("%humor%",)
-    ).fetchone()
-    if not obj:
-        return False
-    prog = db.execute(
-        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-        (obj["id"], uk)
-    ).fetchone()
-    if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje:
-        return False
-    if prog:
-        db.execute(
-            "UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
-            (obj["meta_valor"], agora, prog["id"])
-        )
-    else:
-        pid = str(uuid.uuid4())
-        db.execute(
-            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (pid, obj["id"], uk, obj["meta_valor"], "concluido", hoje, agora, agora)
-        )
-    _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Humor registrado: {obj['nome']}", notify=False)
-    _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
-    db.commit()
-    ws_emit_to_user(uk, "objective_completed",
-                    {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"], "nome": obj["nome"]})
-    return obj["nome"]
-
-def _auto_concluir_login(db, user):
-    hoje = datetime.datetime.utcnow().date()
-    dia_semana = hoje.weekday()
-    if dia_semana >= 5:
-        return False
-    # ILIKE = case-insensitive (PostgreSQL); funciona com acentos (faça, ç, ã)
-    obj = db.execute("SELECT * FROM objetivos_def WHERE nome ILIKE %s AND ativo=1", ("%faça%login%",)).fetchone()
-    if not obj:
-        return False
-    hoje_str = hoje.isoformat()
-    agora = datetime.datetime.utcnow().isoformat()
-    uk = user["key"]
-
-    prog = db.execute("SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s", (obj["id"], uk)).fetchone()
-
-    if prog and prog["status"] == "concluido" and prog["ultima_atualizacao"][:10] == hoje_str:
-        return False
-
-    if prog:
-        db.execute("UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
-                    (obj["meta_valor"], agora, prog["id"]))
-    else:
-        pid = str(uuid.uuid4())
-        db.execute("INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (pid, obj["id"], uk, obj["meta_valor"], "concluido", hoje_str, agora, agora))
-    _award_dcoins(db, uk, obj["recompensa_dcoins"], f"Login diário: {obj['nome']}", notify=False)
-    _update_login_streak(db, uk)
-    _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
-    db.commit()
-    ws_emit_to_user(uk, "objective_completed", {"id": obj["id"], "user_key": uk, "status": "concluido", "progresso": obj["meta_valor"], "nome": obj["nome"]})
-    return obj["nome"]
-
-@app.post("/api/objetivos/{oid}/progresso")
-def atualizar_progresso(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
-    _log_objective_audit._request = request
-    _check_objective_rate_limit(user["key"])
-
-    idempotency_key = (body or {}).get("idempotency_key")
-    if idempotency_key:
-        if idempotency_key in _idempotency_keys:
-            return {"ok": True, "idempotent": True}
-        _idempotency_keys[idempotency_key] = True
-
-    objetivo = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
-    if not objetivo:
-        raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
-    if not objetivo["ativo"]:
-        raise HTTPException(status_code=403, detail="Este objetivo está bloqueado.")
-
-    now = datetime.datetime.utcnow().isoformat()
-    hoje = datetime.datetime.utcnow().date().isoformat()
-    dia_semana = datetime.datetime.utcnow().weekday()
-    dia_mes = datetime.datetime.utcnow().day
-
-    prog = db.execute(
-        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-        (oid, user["key"])
-    ).fetchone()
-
-    # Validate period for already completed objectives
-    if prog and prog["status"] == "concluido":
-        if objetivo["periodicidade"] == "diaria":
-            if prog["ultima_atualizacao"][:10] == hoje:
-                raise HTTPException(status_code=409, detail="Objetivo diário já concluído hoje.")
-        elif objetivo["periodicidade"] == "semanal":
-            ultima_semana = datetime.datetime.fromisoformat(prog["ultima_atualizacao"]).date().isocalendar()[1]
-            if ultima_semana == datetime.datetime.utcnow().date().isocalendar()[1]:
-                raise HTTPException(status_code=409, detail="Objetivo semanal já concluído esta semana.")
-        elif objetivo["periodicidade"] == "mensal":
-            ultima_dt = datetime.datetime.fromisoformat(prog["ultima_atualizacao"]).date()
-            if ultima_dt.year == datetime.datetime.utcnow().date().year and ultima_dt.month == datetime.datetime.utcnow().date().month:
-                raise HTTPException(status_code=409, detail="Objetivo mensal já concluído este mês.")
-
-    increment = (body or {}).get("incremento", 1)
-    if prog:
-        novo_progresso = (prog["progresso_atual"] or 0) + increment
-        novo_status = "concluido" if novo_progresso >= objetivo["meta_valor"] else "progresso"
-        if objetivo["tipo_progresso"] == "unico":
-            novo_progresso = objetivo["meta_valor"]
-            novo_status = "concluido"
-        db.execute(
-            "UPDATE objetivos_progress SET progresso_atual=%s, status=%s, ultima_atualizacao=%s WHERE id=%s",
-            (novo_progresso, novo_status, now, prog["id"])
-        )
-    else:
-        pid = str(uuid.uuid4())
-        novo_progresso = min(increment, objetivo["meta_valor"])
-        novo_status = "concluido" if novo_progresso >= objetivo["meta_valor"] else "progresso"
-        db.execute(
-            """INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (pid, oid, user["key"], novo_progresso, novo_status, now, now, now)
-        )
-
-    if novo_status == "concluido":
-        _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"],
-                      f"Objetivo concluído: {objetivo['nome']}")
-        _update_streak(db, user["key"])
-        _log_atividade(db, "objetivo", user["key"], f"{user['name']} concluiu um Objetivo!")
-
-    _log_objective_audit(db, oid, user["key"], "progresso",
-                         f"Progresso atualizado para {novo_progresso}/{objetivo['meta_valor']} (status: {novo_status})")
-
-    db.commit()
-    event_name = "objective_completed" if novo_status == "concluido" else "objective_updated"
-    ws_emit_to_user(user["key"], event_name, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso})
-    return {"ok": True, "status": novo_status, "progresso": novo_progresso}
-
-@app.post("/api/objetivos/reset")
-def resetar_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
-    hoje_dt = datetime.datetime.utcnow().isoformat()
-    dia_semana = datetime.datetime.utcnow().weekday()
-    dia_mes = datetime.datetime.utcnow().day
-    resetados = 0
-    afetados = {}
-    objetivos = db.execute("SELECT * FROM objetivos_def WHERE ativo=1").fetchall()
-    for obj in objetivos:
-        deve_resetar = False
-        if obj["periodicidade"] == "diaria":
-            deve_resetar = True
-        elif obj["periodicidade"] == "semanal" and dia_semana == 0:
-            deve_resetar = True
-        elif obj["periodicidade"] == "mensal" and dia_mes == 1:
-            deve_resetar = True
-        if deve_resetar:
-            prog_rows = db.execute(
-                "SELECT id, user_key, status FROM objetivos_progress WHERE objetivo_id=%s",
-                (obj["id"],)
-            ).fetchall()
-            for pr in prog_rows:
-                if pr["status"] == "concluido":
-                    uk = pr["user_key"]
-                    if uk not in afetados:
-                        afetados[uk] = []
-                    afetados[uk].append(obj["id"])
-            cur = db.execute(
-                """UPDATE objetivos_progress SET progresso_atual=0,
-                   status=CASE WHEN status='concluido' THEN 'pendente' ELSE status END,
-                   ultimo_reset=%s
-                   WHERE objetivo_id=%s
-                   AND (ultimo_reset IS NULL OR ultimo_reset NOT LIKE %s)""",
-                (hoje_dt, obj["id"], hoje_dt[:10] + '%')
-            )
-            resetados += cur.rowcount
-    db.commit()
-    for uk, oids in afetados.items():
-        for oid in oids:
-            ws_emit_to_user(uk, "objective_uncompleted", {"id": oid, "user_key": uk})
-    ws_emit("objective_updated", {"type": "reset", "resetados": resetados, "user_key": user["key"]})
-    return {"ok": True, "resetados": resetados}
-
-def _award_dcoins(db, user_key, coins, reason, notify=True):
-    pid = str(uuid.uuid4())
-    now = datetime.datetime.utcnow().isoformat()
-    target = db.execute("SELECT key, points FROM users WHERE key=%s", (user_key,)).fetchone()
-    if not target:
-        return
-    db.execute(
-        "INSERT INTO user_points (id, user_key, points, reason, action_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
-        (pid, user_key, coins, reason, "objetivo", now)
-    )
-    new_total = (target["points"] or 0) + coins
-    db.execute("UPDATE users SET points=%s WHERE key=%s", (new_total, user_key))
-    if notify:
-        _notify(db, title="D-Cash recebido",
-                message=f"Você ganhou {coins} D-Cash por: {reason}",
-                ntype="dcash", target_user_key=user_key,
-                sender_key="system", sender_name="Sistema",
-                reference_id=pid, play_sound=True)
-
-@app.get("/api/objetivos/stats")
-def objetivos_stats(user=Depends(get_current_user), db=Depends(get_db)):
-    key = user["key"]
-    total = db.execute("SELECT COUNT(*) as cnt FROM objetivos_def WHERE ativo=1").fetchone()["cnt"] or 0
-    concluidos = db.execute(
-        "SELECT COUNT(*) as cnt FROM objetivos_progress WHERE user_key=%s AND status='concluido'",
-        (key,)
-    ).fetchone()["cnt"] or 0
-    dcoins_row = db.execute(
-        "SELECT COALESCE(SUM(points),0) as total FROM user_points WHERE user_key=%s AND action_type='objetivo'",
-        (key,)
-    ).fetchone()
-    dcoins_ganhos = dcoins_row["total"] if dcoins_row else 0
-    streak = db.execute("SELECT * FROM objetivos_streaks WHERE user_key=%s", (key,)).fetchone()
-    streak_data = dict(streak) if streak else {"current_streak": 0, "max_streak": 0}
-    my_ranking = db.execute(
-        "SELECT COUNT(*) + 1 as pos FROM users WHERE points > (SELECT COALESCE(points,0) FROM users WHERE key=%s)",
-        (key,)
-    ).fetchone()["pos"] if db.execute("SELECT points FROM users WHERE key=%s", (key,)).fetchone() else 0
-    return {
-        "total": total,
-        "concluidos": concluidos,
-        "dcoins_ganhos": dcoins_ganhos,
-        "dcoins_disponiveis": user.get("points", 0),
-        "streak": streak_data,
-        "rank": my_ranking,
-    }
-
-@app.get("/api/objetivos/streak")
-def objetivos_streak(user=Depends(get_current_user), db=Depends(get_db)):
-    streak = db.execute("SELECT * FROM objetivos_streaks WHERE user_key=%s", (user["key"],)).fetchone()
-    return dict(streak) if streak else {"current_streak": 0, "max_streak": 0, "last_date": None}
-
-@app.get("/api/objetivos/leaderboard")
-def objetivos_leaderboard(user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute("""
-        SELECT
-            u.key, u.name, u.dept, u.color, u.photo_url,
-            COALESCE(u.points, 0) AS d_cash_total,
-            ROW_NUMBER() OVER (ORDER BY u.points DESC) AS position
-        FROM users u
-        ORDER BY u.points DESC
-        LIMIT 10
-    """).fetchall()
-    top10 = []
-    for r in rows:
-        d = dict(r)
-        name = d.get("name") or ""
-        parts = name.strip().split()
-        initials = "".join(p[0] for p in parts if p and p[0].isalpha())[:2].upper() or "??"
-        top10.append({
-            "key": d["key"],
-            "name": name,
-            "department": d.get("dept") or "",
-            "initials": initials,
-            "color": d.get("color") or "#2a2a2a",
-            "avatar_url": d.get("photo_url") or None,
-            "d_cash_total": d["d_cash_total"],
-            "position": d["position"],
-        })
-    my_position = db.execute("""
-        SELECT position FROM (
-            SELECT key, ROW_NUMBER() OVER (ORDER BY points DESC) AS position
-            FROM users
-        ) sub WHERE key=%s
-    """, (user["key"],)).fetchone()
-    return {
-        "top10": top10,
-        "myPosition": my_position["position"] if my_position else None,
-    }
-
-@app.get("/api/objetivos/{oid}/audit")
-def objetivo_audit_log(oid: str, user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute(
-        "SELECT * FROM objetivos_audit_log WHERE objetivo_id=%s ORDER BY created_at DESC LIMIT 50",
-        (oid,)
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-@app.post("/api/objetivos/{oid}/concluir")
-def concluir_objetivo(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
-    _log_objective_audit._request = request
-    _check_objective_rate_limit(user["key"])
-
-    idempotency_key = (body or {}).get("idempotency_key")
-    if idempotency_key:
-        if idempotency_key in _idempotency_keys:
-            return {"ok": True, "idempotent": True}
-        _idempotency_keys[idempotency_key] = True
-
-    objetivo = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
-    if not objetivo:
-        raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
-    if not objetivo["ativo"]:
-        raise HTTPException(status_code=403, detail="Este objetivo está bloqueado.")
-
-    now = datetime.datetime.utcnow().isoformat()
-    prog = db.execute(
-        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-        (oid, user["key"])
-    ).fetchone()
-
-    if prog and prog["status"] == "concluido":
-        if objetivo["periodicidade"] == "diaria":
-            if prog["ultima_atualizacao"][:10] == datetime.datetime.utcnow().date().isoformat():
-                raise HTTPException(status_code=409, detail="Objetivo diário já concluído hoje.")
-        elif objetivo["periodicidade"] == "semanal":
-            ult_semana = datetime.datetime.fromisoformat(prog["ultima_atualizacao"]).date().isocalendar()[1]
-            if ult_semana == datetime.datetime.utcnow().date().isocalendar()[1]:
-                raise HTTPException(status_code=409, detail="Objetivo semanal já concluído esta semana.")
-        elif objetivo["periodicidade"] == "mensal":
-            ult_dt = datetime.datetime.fromisoformat(prog["ultima_atualizacao"]).date()
-            if ult_dt.year == datetime.datetime.utcnow().date().year and ult_dt.month == datetime.datetime.utcnow().date().month:
-                raise HTTPException(status_code=409, detail="Objetivo mensal já concluído este mês.")
-
-    if prog:
-        db.execute(
-            "UPDATE objetivos_progress SET progresso_atual=%s, status='concluido', ultima_atualizacao=%s WHERE id=%s",
-            (objetivo["meta_valor"], now, prog["id"])
-        )
-    else:
-        pid = str(uuid.uuid4())
-        db.execute(
-            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (pid, oid, user["key"], objetivo["meta_valor"], "concluido", now, now, now)
-        )
-
-    _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"], f"Objetivo concluído: {objetivo['nome']}")
-    _update_streak(db, user["key"])
-    _log_objective_audit(db, oid, user["key"], "concluir",
-                         f"Objetivo concluído manualmente. Recompensa: {objetivo['recompensa_dcoins']} D-Cash")
-    db.commit()
-    ws_emit_to_user(user["key"], "objective_completed",
-                    {"id": oid, "user_key": user["key"], "status": "concluido", "progresso": objetivo["meta_valor"], "nome": objetivo["nome"]})
-    _notify(db, title="🎯 Objetivo concluído",
-            message=f"{user['name']} concluiu o objetivo: {objetivo['nome']}",
-            ntype="achievement",
-            sender_key=user["key"], sender_name=user["name"],
-            play_sound=False)
-    return {"ok": True}
-
-@app.post("/api/objetivos/{oid}/incrementar")
-def incrementar_objetivo(oid: str, body: dict = None, user=Depends(get_current_user), db=Depends(get_db), request: Request = None):
-    _log_objective_audit._request = request
-    _check_objective_rate_limit(user["key"])
-
-    idempotency_key = (body or {}).get("idempotency_key")
-    if idempotency_key:
-        if idempotency_key in _idempotency_keys:
-            return {"ok": True, "idempotent": True}
-        _idempotency_keys[idempotency_key] = True
-
-    objetivo = db.execute("SELECT * FROM objetivos_def WHERE id=%s", (oid,)).fetchone()
-    if not objetivo:
-        raise HTTPException(status_code=404, detail="Objetivo não encontrado.")
-    if not objetivo["ativo"]:
-        raise HTTPException(status_code=403, detail="Este objetivo está bloqueado.")
-
-    now = datetime.datetime.utcnow().isoformat()
-    prog = db.execute(
-        "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-        (oid, user["key"])
-    ).fetchone()
-    increment = (body or {}).get("incremento", 1)
-
-    if prog:
-        if objetivo["tipo_progresso"] == "unico":
-            novo_progresso = objetivo["meta_valor"]
-            novo_status = "concluido"
-        else:
-            novo_progresso = (prog["progresso_atual"] or 0) + increment
-            novo_status = "concluido" if novo_progresso >= objetivo["meta_valor"] else "progresso"
-        db.execute(
-            "UPDATE objetivos_progress SET progresso_atual=%s, status=%s, ultima_atualizacao=%s WHERE id=%s",
-            (novo_progresso, novo_status, now, prog["id"])
-        )
-    else:
-        pid = str(uuid.uuid4())
-        novo_progresso = min(increment, objetivo["meta_valor"])
-        novo_status = "concluido" if novo_progresso >= objetivo["meta_valor"] else "progresso"
-        db.execute(
-            "INSERT INTO objetivos_progress (id, objetivo_id, user_key, progresso_atual, status, ultimo_reset, ultima_atualizacao, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (pid, oid, user["key"], novo_progresso, novo_status, now, now, now)
-        )
-
-    if novo_status == "concluido":
-        if objetivo["tipo_progresso"] != "sequencia":
-            _award_dcoins(db, user["key"], objetivo["recompensa_dcoins"],
-                          f"Objetivo concluído: {objetivo['nome']}")
-            _update_streak(db, user["key"])
-        else:
-            _update_streak(db, user["key"])
-
-    _log_objective_audit(db, oid, user["key"], "incrementar",
-                         f"Incremento de {increment}: {novo_progresso}/{objetivo['meta_valor']} (status: {novo_status})")
-    db.commit()
-    ev = "objective_completed" if novo_status == "concluido" else "objective_updated"
-    ws_emit_to_user(user["key"], ev, {"id": oid, "user_key": user["key"], "status": novo_status, "progresso": novo_progresso, "nome": objetivo["nome"]})
-    return {"ok": True, "status": novo_status, "progresso": novo_progresso}
-
-# ─────────────────────────────────────────────────────────────────────────────
 # FEEDBACK SYSTEM
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -4287,29 +4123,18 @@ def get_metric_feedbacks(user=Depends(get_current_user), db=Depends(get_db)):
     ).fetchone()
     return {"count": row["cnt"] if row else 0}
 
-@app.get("/api/metricas/objetivos")
-def get_metric_objetivos(user=Depends(get_current_user), db=Depends(get_db)):
-    row = db.execute(
-        "SELECT COUNT(*) as cnt FROM objetivos WHERE user_key=%s",
-        (user["key"],)
-    ).fetchone()
-    return {"count": row["cnt"] if row else 0}
-
-@app.get("/api/metricas/objetivos/concluidos")
-def get_metric_objetivos_concluidos(user=Depends(get_current_user), db=Depends(get_db)):
-    row = db.execute(
-        """SELECT COUNT(*) as cnt FROM objetivos_progress op
-           JOIN objetivos_def od ON od.id = op.objetivo_id
-           WHERE op.user_key=%s AND op.status='concluido' AND od.ativo=1""",
-        (user["key"],)
-    ).fetchone()
-    return {"count": row["cnt"] if row else 0}
-
 @app.get("/api/metricas/pesquisas")
 def get_metric_pesquisas(user=Depends(get_current_user), db=Depends(get_db)):
     row = db.execute(
         "SELECT COUNT(*) as cnt FROM pesquisas WHERE user_key=%s",
         (user["key"],)
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+@app.get("/api/metricas/colaboradores")
+def get_metric_colaboradores(user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute(
+        "SELECT COUNT(*) as cnt FROM users WHERE desligado=0"
     ).fetchone()
     return {"count": row["cnt"] if row else 0}
 
@@ -4439,7 +4264,6 @@ def concluir_tarefa(tarefa_id: str, user=Depends(get_current_user), db=Depends(g
         (now, now, tarefa_id)
     )
 
-    _auto_progress_tarefas(db, user["key"])
 
     tipo_atv = "tarefa_gestor" if tarefa.get("tipo") == "gestor" else "tarefa_rotina"
     _log_atividade(db, tipo_atv, user["key"],
@@ -4807,7 +4631,6 @@ def concluir_tarefa_agora(tarefa_id: str, user=Depends(get_current_user), db=Dep
     tipo_atv = "tarefa_gestor" if tarefa.get("tipo") == "gestor" else "tarefa_rotina"
     _log_atividade(db, tipo_atv, user["key"],
                    f"{user['name']} concluiu a tarefa: {tarefa.get('titulo', '')}")
-    _auto_progress_tarefas(db, user["key"])
 
     _log_task_history(db, tarefa_id, "concluida", user["key"], user["name"],
                       f"Tarefa concluída. Duração: {total_duration}s")
@@ -5002,6 +4825,7 @@ def _normalize_birthday_row(row: dict):
         "mes": mes,
         "departamento": departamento,
         "foto_url": foto_url,
+        "user_key": row.get("user_key"),
     }
 
 @app.get("/api/birthdays/current-month")
@@ -5016,11 +4840,14 @@ def get_current_month_birthdays(user=Depends(get_current_user), db=Depends(get_d
 
     current_month = datetime.date.today().month
     rows = db.execute("""
-        SELECT id, nome, tipo, dia, mes, departamento, foto_url
-        FROM aniversarios
-        WHERE ativo = true
-          AND mes = %s
-        ORDER BY dia ASC
+        SELECT a.id, a.nome, a.tipo, a.dia, a.mes, a.departamento,
+               COALESCE(NULLIF(a.foto_url, ''), u.photo_url) AS foto_url,
+               u.key AS user_key
+        FROM aniversarios a
+        LEFT JOIN users u ON lower(u.name) = lower(a.nome)
+        WHERE a.ativo = true
+          AND a.mes = %s
+        ORDER BY a.dia ASC
     """, (current_month,)).fetchall()
 
     # Security: strict response shaping + sanitization to mitigate XSS and
@@ -5076,6 +4903,13 @@ def _notify(db, *, title: str, message: str, ntype: str,
     notif_id = str(uuid.uuid4())
     created_at = datetime.datetime.utcnow().isoformat()
     resolved_audience = audience or ('personal' if target_user_key else 'all')
+    sender_photo = None
+    if sender_key:
+        sender_row = db.execute(
+            "SELECT photo_url FROM users WHERE key=%s", (sender_key,)
+        ).fetchone()
+        if sender_row:
+            sender_photo = sender_row["photo_url"]
     db.execute(
         """INSERT INTO notifications
         (id, title, message, type, target_user_key, audience,
@@ -5095,6 +4929,7 @@ def _notify(db, *, title: str, message: str, ntype: str,
         "audience": resolved_audience,
         "sender_key": sender_key,
         "sender_name": sender_name,
+        "sender_photo": sender_photo,
         "reference_id": reference_id,
         "play_sound": play_sound,
         "is_read": False,
@@ -5119,11 +4954,16 @@ def _extract_mentions(text: str):
 def get_notifications(user=Depends(get_current_user), db=Depends(get_db)):
     _ensure_notifications_table(db)
     rows = db.execute(
-        """SELECT * FROM notifications
-        WHERE target_user_key = %s
-            OR audience = 'all'
-            OR audience = %s
-        ORDER BY created_at DESC
+        """SELECT n.*,
+            u.initials AS actor_initials,
+            u.color    AS actor_color,
+            u.photo_url AS actor_photo
+        FROM notifications n
+        LEFT JOIN users u ON u.key = n.sender_key
+        WHERE n.target_user_key = %s
+            OR n.audience = 'all'
+            OR n.audience = %s
+        ORDER BY n.created_at DESC
         LIMIT 40""",
         (user["key"], user.get("dept", ""))
     ).fetchall()
@@ -5216,7 +5056,8 @@ def get_notifications_v2(
     rows = db.execute(
         f"""SELECT n.*,
             u.initials AS actor_initials,
-            u.color   AS actor_color
+            u.color   AS actor_color,
+            u.photo_url AS actor_photo
             FROM notifications n
             LEFT JOIN users u ON n.sender_key = u.key
             WHERE {where}
@@ -5237,7 +5078,7 @@ def get_notifications_v2(
             "actor": {
                 "id": d.get("sender_key"),
                 "name": actor_name,
-                "avatar_url": None,
+                "avatar_url": d.get("actor_photo") or None,
                 "initials": d.get("actor_initials") or _get_initials(actor_name),
                 "color": d.get("actor_color") or _get_actor_color(actor_name),
             },
@@ -6065,8 +5906,8 @@ def get_evento(user=Depends(get_current_user), db=Depends(get_db)):
 def _can_gestao(user: dict) -> bool:
     return bool(
         user.get("is_admin") or user.get("is_admin_user") or
+        user.get("access_level", 0) >= 2 or
         user.get("is_rh") or user.get("is_diretor") or user.get("is_leader") or
-        user.get("access_level", 0) >= 1 or
         user.get("org_position") in ("gestor", "supervisor", "lider")
     )
 
@@ -6085,19 +5926,6 @@ def gestao_dashboard(user=Depends(get_current_user), db=Depends(get_db)):
     result = []
     for u in users_rows:
         u_dict = dict(u)
-
-        # Objetivos concluídos
-        obj_concluidos = db.execute(
-            """SELECT COUNT(*) as cnt FROM objetivos_progress op
-               JOIN objetivos_def od ON od.id = op.objetivo_id
-               WHERE op.user_key=%s AND op.status='concluido' AND od.ativo=1""",
-            (u_dict["key"],)
-        ).fetchone()["cnt"]
-
-        # Total de objetivos ativos
-        total_obj = db.execute(
-            "SELECT COUNT(*) as cnt FROM objetivos_def WHERE ativo=1"
-        ).fetchone()["cnt"]
 
         # Feedbacks recebidos
         fb_recebidos = db.execute(
@@ -6138,8 +5966,6 @@ def gestao_dashboard(user=Depends(get_current_user), db=Depends(get_db)):
             "org_position": u_dict.get("org_position", "colaborador"),
             "hire_date": u_dict.get("hire_date", ""),
             "stats": {
-                "objetivos_concluidos": obj_concluidos or 0,
-                "total_objetivos": total_obj or 0,
                 "feedbacks_recebidos": fb_recebidos or 0,
                 "feedbacks_dados": fb_dados or 0,
                 "ultimo_humor": dict(ultimo_humor) if ultimo_humor else None,
@@ -6162,25 +5988,6 @@ def gestao_dashboard_usuario(target_key: str, user=Depends(get_current_user), db
     target_dict.pop("password_hash", None)
 
     hoje = datetime.date.today().isoformat()
-
-    # Objetivos
-    objetivos = db.execute(
-        "SELECT * FROM objetivos_def WHERE ativo=1 ORDER BY nome"
-    ).fetchall()
-    objetivos_data = []
-    for obj in objetivos:
-        prog = db.execute(
-            "SELECT * FROM objetivos_progress WHERE objetivo_id=%s AND user_key=%s",
-            (obj["id"], target_key)
-        ).fetchone()
-        objetivos_data.append({
-            "id": obj["id"],
-            "nome": obj["nome"],
-            "meta_valor": obj["meta_valor"],
-            "periodicidade": obj["periodicidade"],
-            "recompensa_dcoins": obj["recompensa_dcoins"],
-            "progresso": dict(prog) if prog else None,
-        })
 
     # Feedbacks recebidos
     feedbacks = db.execute(
@@ -6221,7 +6028,6 @@ def gestao_dashboard_usuario(target_key: str, user=Depends(get_current_user), db
 
     return {
         "user": target_dict,
-        "objetivos": objetivos_data,
         "feedbacks": [dict(f) for f in feedbacks],
         "humor": humor_translated,
         "atividades": [dict(a) for a in atividades],
