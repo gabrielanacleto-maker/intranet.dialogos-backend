@@ -1,0 +1,27 @@
+INFO:     Started server process [3624]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     ('127.0.0.1', 45567) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 61026) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 1581) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 60195) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 7139) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 47392) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 55364) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 2996) - "WebSocket /socket.io/?EIO=4&transport=websocket" [accepted]
+INFO:     connection open

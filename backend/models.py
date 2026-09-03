@@ -12,6 +12,25 @@ class ChangePasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     new_password: str
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordWithTokenRequest(BaseModel):
+    token: str
+    new_password: str
+
+class PesquisaRequest(BaseModel):
+    titulo: str
+    pergunta: str
+    escala_max: int = 10
+    expires_at: Optional[str] = None
+
+class PesquisaRespostaRequest(BaseModel):
+    pesquisa_id: str
+    nota: int
+    comentario: Optional[str] = ""
+    anonima: bool = False
+
 class DesligarRequest(BaseModel):
     motivo: str = ""
     obs: str = ""
@@ -23,12 +42,37 @@ class CargoRequest(BaseModel):
 class CargoGeralRequest(BaseModel):
     nome: str
 
+# ── Estrutura de cargos multiempresa ───────────────────────────────────────────
+class EstruturaItemRequest(BaseModel):
+    nome: str
+    descricao: str = ""
+    ordem: int = 0
+    ativo: bool = True
+
+class CargoEstruturaRequest(BaseModel):
+    nome: str
+    nivel: int = 0  # ordem opcional de exibição (não é escada obrigatória)
+    empresa_id: Optional[str] = None          # apenas Admin nível 3 pode informar
+    departamento_id: Optional[str] = None
+    familia_id: Optional[str] = None
+    trilha_id: Optional[str] = None
+    nivel_hierarquico_id: Optional[str] = None
+    descricao: str = ""
+    ativo: bool = True
+
 class EmpresaRequest(BaseModel):
     nome: str
     cnpj: str = ""
     socios: str = ""
     endereco: str = ""
     logo: str = ""
+
+class CarreiraHistoricoRequest(BaseModel):
+    cargo: str
+    start_date: str
+    end_date: Optional[str] = ""
+    cargo_id: Optional[str] = None
+    senioridade_id: Optional[str] = None
 
 class CreateUserRequest(BaseModel):
     key: str
@@ -53,7 +97,10 @@ class CreateUserRequest(BaseModel):
     nivel_dourado: Optional[bool] = False
     cargo_id: Optional[str] = None
     senioridade: Optional[str] = None
+    senioridade_id: Optional[str] = None
+    departamento_id: Optional[str] = None
     empresa_id: Optional[str] = None
+    email: Optional[str] = None
 
 class UpdateUserRequest(BaseModel):
     name: str
@@ -76,7 +123,10 @@ class UpdateUserRequest(BaseModel):
     nivel_dourado: Optional[bool] = False
     cargo_id: Optional[str] = None
     senioridade: Optional[str] = None
+    senioridade_id: Optional[str] = None
+    departamento_id: Optional[str] = None
     empresa_id: Optional[str] = None
+    email: Optional[str] = None
 
 class CreatePostRequest(BaseModel):
     feed: str = "feed"
@@ -116,6 +166,14 @@ class OuvidoriaStatusRequest(BaseModel):
 class OuvidoriaResponseRequest(BaseModel):
     text: str
 
+# ── Sugestões de Melhorias ──────────────────────────────────────────────────────
+class SugestaoRequest(BaseModel):
+    text: str
+
+class SugestaoStatusRequest(BaseModel):
+    is_done: bool
+    reason: str = ""
+
 class ChatMessageRequest(BaseModel):
     room_id: str
     text: str
@@ -143,6 +201,9 @@ class PointsRequest(BaseModel):
 
 class AboutMeRequest(BaseModel):
     about_me: str = ""
+
+class ComportamentalRequest(BaseModel):
+    dart: str = ""
 
 class OrgEntry(BaseModel):
     user_key: str
@@ -277,6 +338,7 @@ class PdiRequest(BaseModel):
     data_fim: str
     blocos: list = []
     status: str = "ativo"
+    template_id: Optional[str] = None
 
 class PdiUpdateRequest(BaseModel):
     titulo: Optional[str] = None
@@ -287,3 +349,54 @@ class PdiUpdateRequest(BaseModel):
     data_conclusao: Optional[str] = None
     justificativa_expiracao: Optional[str] = None
     blocos: Optional[list] = None
+
+class PdiTemplateRequest(BaseModel):
+    titulo: str
+    descricao: str = ""
+    tipo: str = "desenvolvimento"  # onboarding | promocao | desenvolvimento
+    auto_onboarding: bool = False
+    blocos: list = []
+
+class PdiTemplateAplicarRequest(BaseModel):
+    user_key: str
+    data_inicio: str
+    data_fim: str
+
+class PdiBlocoConcluirRequest(BaseModel):
+    concluido: bool
+
+# ── Contratação ────────────────────────────────────────────────────────────────
+class VagaCreateRequest(BaseModel):
+    titulo: str
+    senioridade: str = ""
+    descricao: str = ""
+    salario: str = ""
+    requisitos: str = ""
+    expectativas: str = ""
+    formacao: str = ""
+    palavras_chave: str = ""
+    deadline: Optional[str] = ""
+
+class VagaReviewRequest(BaseModel):
+    aprovada: bool
+    motivo: Optional[str] = ""
+    deadline: Optional[str] = ""
+
+class VagaUpdateRequest(BaseModel):
+    titulo: Optional[str] = None
+    senioridade: Optional[str] = None
+    descricao: Optional[str] = None
+    salario: Optional[str] = None
+    requisitos: Optional[str] = None
+    expectativas: Optional[str] = None
+    formacao: Optional[str] = None
+    palavras_chave: Optional[str] = None
+    deadline: Optional[str] = None
+    status: Optional[str] = None
+
+class CandidaturaStatusRequest(BaseModel):
+    status: str
+
+class ExperienciaRegistroRequest(BaseModel):
+    resultado: str = ""
+    notas: str = ""

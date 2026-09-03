@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Candidatura · Clínica Diálogos</title>
+<style>
+  :root {
+    --olive: #6B7B3A;
+    --olive-dark: #4A5528;
+    --bg: #FFFDF5;
+    --surface: #FFFFFF;
+    --border: #E5E0CF;
+    --text: #2F3226;
+    --muted: #8A8D7C;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', 'DM Sans', -apple-system, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh; padding: 32px 16px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  .brand { text-align: center; margin-bottom: 28px; }
+  .brand img { width: 180px; max-width: 60%; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; box-shadow: 0 4px 20px rgba(74,85,40,0.06); }
+  .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--olive); }
+  h1 { font-size: 24px; margin: 4px 0 8px; }
+  .desc { font-size: 14px; color: var(--muted); line-height: 1.55; white-space: pre-wrap; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .tag { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(107,123,58,0.08); color: var(--olive-dark); font-weight: 600; }
+  hr.sep { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
+  label.fl { display: block; font-size: 13px; font-weight: 700; margin: 14px 0 6px; }
+  label.fl small { font-weight: 400; color: var(--muted); }
+  input[type=text], input[type=email], input[type=tel], textarea, select {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px;
+    font-size: 14px; font-family: inherit; background: var(--bg); color: var(--text);
+  }
+  textarea { min-height: 84px; resize: vertical; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--olive); }
+  .file-box { display: flex; align-items: center; gap: 10px; }
+  .file-box input[type=file] { flex: 1; font-size: 13px; }
+  h2.sec { font-size: 13px; letter-spacing: 1px; text-transform: uppercase; color: var(--olive); margin-bottom: 4px; }
+  .sec-hint { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  .disc-group { border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 10px; background: var(--bg); }
+  .disc-row { display: grid; grid-template-columns: 1fr 52px 52px; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px dashed var(--border); }
+  .disc-row:last-child { border-bottom: none; }
+  .disc-row span { font-size: 13px; line-height: 1.4; }
+  .disc-row label { display: flex; align-items: center; justify-content: center; cursor: pointer; accent-color: var(--olive); }
+  .btn {
+    width: 100%; margin-top: 22px; padding: 13px; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--olive), var(--olive-dark)); color: #fff;
+    font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: opacity .15s;
+  }
+  .btn:hover { opacity: 0.92; }
+  .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+  .msg { margin-top: 14px; padding: 12px 14px; border-radius: 10px; font-size: 14px; display: none; }
+  .msg.err { display: block; background: rgba(239,68,68,0.08); color: #B91C1C; border: 1px solid rgba(239,68,68,0.25); }
+  .success { text-align: center; padding: 30px 10px; }
+  .success .ok-circle { width: 64px; height: 64px; border-radius: 50%; background: rgba(107,123,58,0.12); color: var(--olive-dark);
+    display: flex; align-items: center; justify-content: center; font-size: 30px; margin: 0 auto 16px; }
+  .success p { color: var(--muted); font-size: 14px; margin-top: 6px; }
+  .loading { text-align: center; padding: 60px 0; color: var(--muted); }
+  @media (max-width: 560px) { .card { padding: 18px; } .disc-row { grid-template-columns: 1fr 40px 40px; } }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><div class="loading">Carregando...</div></div>
+
+<script>
+const TOKEN = window.location.pathname.split('/').pop();
+const DIM_LABELS = ['Decisiva e direta', 'Comunicativa e animada', 'Calma e paciente', 'Detalhista e organizada'];
+const QUESTIONS = [
+  ["Assumo o controle e decido rápido quando algo é urgente.","Comunico com entusiasmo e mobilizo as pessoas ao meu redor.","Mantenho a calma e sigo o ritmo do grupo com paciência.","Analiso todos os detalhes antes de tomar uma decisão."],
+  ["Enfrento conflitos de frente em busca de resultados.","Crio conexões facilmente com pessoas desconhecidas.","Prefiro ambientes estáveis e rotinas bem definidas.","Sigo normas e processos com precisão."],
+  ["Gosto de desafios grandes e de competir por metas.","Sou otimista mesmo diante de problemas.","Sou um bom ouvinte e apoio meus colegas.","Exijo exatidão e qualidade em tudo que entrego."],
+  ["Tomo iniciativas sem precisar que me mandem.","Persuado as pessoas com facilidade.","Trabalho melhor em equipe, de forma cooperativa.","Organizo meu trabalho de forma metódica."],
+  ["Falo e ajo com rapidez e firmeza.","Sou expressivo(a) e gosto de ser reconhecido(a).","Evito mudanças bruscas e prefiro previsibilidade.","Reviso meu trabalho várias vezes antes de entregar."],
+  ["Assumo riscos calculados para vencer desafios.","Animo o ambiente com humor e energia.","Mantenho a harmonia mesmo sob pressão.","Baseio minhas decisões em fatos e dados."],
+  ["Lidero grupos naturalmente quando necessário.","Faço amizades e networking com facilidade.","Sou consistente e confiável nas minhas entregas.","Cumpro regras e prazos à risca."],
+  ["Vou direto ao ponto nas conversas.","Gosto de trabalhar com público e apresentar ideias.","Prefiro ouvir antes de dar minha opinião.","Gosto de ter um plano detalhado antes de executar."]
+];
+let VAGA = null;
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+
+async function init() {
+  try {
+    const r = await fetch(`/api/public/vagas/${TOKEN}`);
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      throw new Error(e.detail || 'Inscrição indisponível.');
+    }
+    VAGA = await r.json();
+    render();
+  } catch (err) {
+    document.getElementById('app').innerHTML =
+      `<div class="card"><div class="success"><p style="color:#B91C1C">${esc(err.message)}</p></div></div>`;
+  }
+}
+
+function render() {
+  const tags = [];
+  if (VAGA.senioridade) tags.push(`<span class="tag">Senioridade: ${esc(VAGA.senioridade)}</span>`);
+  if (VAGA.salario) tags.push(`<span class="tag">Faixa salarial: ${esc(VAGA.salario)}</span>`);
+  if (VAGA.deadline) tags.push(`<span class="tag">Inscrições até ${esc(VAGA.deadline.split('-').reverse().join('/'))}</span>`);
+
+  let discHtml = QUESTIONS.map((g, gi) => `
+    <div class="disc-group">
+      <div style="font-size:11px;font-weight:700;color:var(--olive);margin-bottom:6px">Grupo ${gi+1}</div>
+      ${g.map((q, qi) => `
+        <div class="disc-row">
+          <span>${esc(q)}</span>
+          <label title="Mais parecido comigo"><input type="radio" name="most-${gi}" value="${qi}" onchange="onDisc(${gi})"></label>
+          <label title="Menos parecido comigo"><input type="radio" name="least-${gi}" value="${qi}" onchange="onDisc(${gi})"></label>
+        </div>`).join('')}
+    </div>`).join('');
+
+  document.getElementById('app').innerHTML = `
+    <div class="brand"><img src="/clinica-dialogos.png" alt="Clínica Diálogos"
+         onerror="this.style.display='none'"></div>
+    <div class="card">
+      <div class="eyebrow">Trabalhe conosco</div>
+      <h1>${esc(VAGA.titulo)}</h1>
+      <div class="desc">${esc(VAGA.descricao)}</div>
+      <div class="meta">${tags.join('')}</div>
+
+      ${(VAGA.requisitos || VAGA.expectativas || VAGA.formacao) ? '<hr class="sep">' : ''}
+      ${VAGA.requisitos ? `<h2 class="sec">O que você precisa ter</h2><div class="desc">${esc(VAGA.requisitos)}</div>` : ''}
+      ${VAGA.expectativas ? `<label class="fl">O que esperamos de você</label><div class="desc">${esc(VAGA.expectativas)}</div>` : ''}
+      ${VAGA.formacao ? `<label class="fl">Requisitos acadêmicos</label><div class="desc">${esc(VAGA.formacao)}</div>` : ''}
+
+      <hr class="sep">
+      <form id="form">
+        <label class="fl">Nome completo *</label>
+        <input type="text" name="nome" required minlength="3" placeholder="Seu nome completo">
+
+        <label class="fl">E-mail *</label>
+        <input type="email" name="email" required placeholder="seu@email.com">
+
+        <label class="fl">Telefone</label>
+        <input type="tel" name="telefone" placeholder="(00) 00000-0000">
+
+        <label class="fl">Por que você quer essa vaga?</label>
+        <textarea name="motivacao" placeholder="Conte brevemente sua motivação..."></textarea>
+
+        <label class="fl">Sua experiência com o que a vaga pede</label>
+        <textarea name="experiencias" placeholder="Resuma suas experiências relevantes..."></textarea>
+
+        <label class="fl">Currículo <small>(PDF, DOC ou DOCX · máx 10MB)</small></label>
+        <div class="file-box"><input type="file" name="curriculo" accept=".pdf,.doc,.docx"></div>
+        <small style="color:var(--muted)">O currículo alimenta nossa análise inteligente de aderência à vaga.</small>
+
+        <hr class="sep">
+        <h2 class="sec">Perfil comportamental</h2>
+        <div class="sec-hint">Em cada grupo, marque qual frase é <b>mais parecida</b> com você e qual é <b>menos parecida</b>. Não há resposta certa ou errada.</div>
+        ${discHtml}
+
+        <button type="submit" class="btn" id="submitBtn">Enviar candidatura</button>
+        <div class="msg" id="msg"></div>
+      </form>
+    </div>
+    <p style="text-align:center;color:var(--muted);font-size:11px;margin-top:18px">Clínica Diálogos · Gestão e Cuidado em um só lugar!</p>`;
+
+  document.getElementById('form').addEventListener('submit', submit);
+}
+
+function onDisc() {}
+
+async function submit(ev) {
+  ev.preventDefault();
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('submitBtn');
+  msg.className = 'msg'; msg.style.display = 'none';
+
+  const most = [], least = [];
+  for (let i = 0; i < QUESTIONS.length; i++) {
+    const m = document.querySelector(`input[name="most-${i}"]:checked`);
+    const l = document.querySelector(`input[name="least-${i}"]:checked`);
+    if (!m || !l) return showErr('Responda os dois campos de todos os grupos do perfil comportamental.');
+    most.push(m.value); least.push(l.value);
+  }
+  for (let i = 0; i < QUESTIONS.length; i++) {
+    if (most[i] === least[i]) return showErr('Em cada grupo, as opções "mais" e "menos" devem ser frases diferentes.');
+  }
+
+  const f = new FormData();
+  f.append('nome', document.forms[0].nome.value);
+  f.append('email', document.forms[0].email.value);
+  f.append('telefone', document.forms[0].telefone.value);
+  f.append('respostas', JSON.stringify({
+    motivacao: document.forms[0].motivacao.value,
+    experiencias: document.forms[0].experiencias.value,
+  }));
+  f.append('disc_most', most.join(','));
+  f.append('disc_least', least.join(','));
+  const file = document.forms[0].curriculo.files[0];
+  if (file) f.append('curriculo', file);
+
+  btn.disabled = true; btn.textContent = 'Enviando...';
+  try {
+    const r = await fetch(`/api/public/vagas/${TOKEN}/candidatura`, { method: 'POST', body: f });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || 'Erro ao enviar candidatura.');
+    document.getElementById('app').innerHTML = `
+      <div class="brand"><img src="/clinica-dialogos.png" alt="" onerror="this.style.display='none'"></div>
+      <div class="card"><div class="success">
+        <div class="ok-circle">&#10003;</div>
+        <h1 style="font-size:20px">Candidatura enviada!</h1>
+        <p>Recebemos sua inscrição para <b>${esc(VAGA.titulo)}</b>.<br>Nossa equipe analisará seu perfil e entrará em contato.</p>
+        <p style="margin-top:14px">Perfil comportamental: <b>${esc(data.perfil_disc || '-')}</b></p>
+      </div></div>`;
+    window.scrollTo(0, 0);
+  } catch (err) {
+    showErr(err.message);
+    btn.disabled = false; btn.textContent = 'Enviar candidatura';
+  }
+}
+
+function showErr(t) {
+  const msg = document.getElementById('msg');
+  msg.className = 'msg err'; msg.textContent = t;
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+
+init();
+</script>
+</body>
+</html>

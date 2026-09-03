@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Teste DART · Avaliação de Perfil Comportamental</title>
+<style>
+  :root {
+    --olive: #6B7B3A;
+    --olive-dark: #4A5528;
+    --olive-soft: #EEF1E2;
+    --bg: #F7F6EF;
+    --surface: #FFFFFF;
+    --border: #E5E0CF;
+    --text: #2F3226;
+    --muted: #8A8D7C;
+    --accent: #C9A84C;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Segoe UI', 'DM Sans', -apple-system, sans-serif;
+    background: var(--olive); color: var(--text); min-height: 100vh; padding: 28px 16px 40px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .brand { text-align: center; margin-bottom: 22px; }
+  .brand img.logo {
+    width: 180px; max-width: 70%; height: auto; margin: 0 auto 6px; display: block;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 30px; box-shadow: 0 6px 24px rgba(74,85,40,0.07);
+  }
+  .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 1.6px; text-transform: uppercase; color: var(--olive); text-align: center; }
+  h1 { font-size: 26px; margin: 6px 0 2px; font-weight: 800; text-align: center; }
+  .subtitle { font-size: 14px; color: var(--muted); margin-bottom: 18px; text-align: center; padding-bottom: 8px; }
+  .desc { font-size: 14px; color: var(--text); line-height: 1.6; }
+  .desc + .desc { margin-top: 8px; }
+  .intro-block { margin: 18px 0 0; }
+  .intro-block h2 { font-size: 13px; letter-spacing: 1px; text-transform: uppercase; color: var(--olive); margin-bottom: 8px; }
+  .rules { display: grid; gap: 8px; margin-top: 8px; }
+  .rule {
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px; font-size: 14px;
+  }
+  .rule .num {
+    width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
+    background: var(--olive-soft); color: var(--olive-dark); font-weight: 800;
+    display: flex; align-items: center; justify-content: center; font-size: 14px;
+  }
+  .rule span.desc2 { font-size: 13px; color: var(--text); }
+  .rule span.desc2 small { display: block; color: var(--muted); font-size: 11px; }
+  .btn {
+    width: 100%; margin-top: 24px; padding: 14px; border: none; border-radius: 11px;
+    background: linear-gradient(135deg, var(--olive), var(--olive-dark)); color: #fff;
+    font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: opacity .15s;
+  }
+  .btn:hover { opacity: 0.92; }
+  .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+  .btn-outline {
+    background: transparent; color: var(--olive-dark); border: 1.5px solid var(--border); margin-top: 0;
+  }
+  .btn-outline:hover { border-color: var(--olive); opacity: 1; }
+
+  /* ── Barra de progresso ── */
+  .progress-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .progress-label { font-size: 13px; font-weight: 700; color: var(--muted); }
+  .progress-curr { font-size: 13px; font-weight: 800; color: var(--olive-dark); }
+  .bar { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; margin-bottom: 22px; }
+  .bar > div { height: 100%; background: linear-gradient(90deg, var(--olive), var(--olive-dark)); border-radius: 999px; transition: width .25s ease; }
+
+  .qindex { font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--olive); }
+  .qtext { font-size: 18px; font-weight: 700; line-height: 1.45; margin: 8px 0 20px; }
+  .alt-list { display: grid; gap: 12px; }
+  .alt {
+    border: 1.5px solid var(--border); border-radius: 13px; padding: 14px 14px 14px 16px;
+    display: flex; gap: 12px; align-items: flex-start; background: var(--surface);
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .alt .txt { flex: 1; font-size: 14px; line-height: 1.5; }
+  .picker { display: flex; gap: 4px; flex-shrink: 0; }
+  .picker button {
+    width: 34px; height: 34px; border-radius: 9px; border: 1.5px solid var(--border);
+    background: var(--bg); color: var(--muted); font-weight: 800; font-size: 14px; cursor: pointer;
+    font-family: inherit; transition: all .12s;
+  }
+  .picker button:hover:not(:disabled) { border-color: var(--olive); color: var(--olive-dark); }
+  .picker button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .picker button.sel { background: var(--olive-dark); border-color: var(--olive-dark); color: #fff; }
+
+  .nav-row { display: flex; gap: 10px; margin-top: 24px; }
+  .nav-row .btn { margin-top: 0; flex: 1; }
+  .hint-warn {
+    margin-top: 14px; padding: 11px 14px; border-radius: 10px; font-size: 13px; display: none;
+    background: #FBF4E2; color: #8A6D1F; border: 1px solid rgba(201,168,76,.4);
+  }
+  .hint-warn.show { display: block; }
+  .msg { margin-top: 14px; padding: 12px 14px; border-radius: 10px; font-size: 14px; display: none; }
+  .msg.err { display: block; background: rgba(239,68,68,0.08); color: #B91C1C; border: 1px solid rgba(239,68,68,0.25); }
+
+  .success { text-align: center; padding: 20px 10px; }
+  .success .ok-circle {
+    width: 72px; height: 72px; border-radius: 50%; margin: 0 auto 18px;
+    background: var(--olive-soft); color: var(--olive-dark); font-size: 32px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .success h1 { font-size: 22px; }
+  .success p { color: var(--muted); font-size: 14px; line-height: 1.6; margin-top: 8px; }
+
+  .loading { text-align: center; padding: 70px 0; color: var(--muted); }
+  .loading .spinner {
+    width: 36px; height: 36px; margin: 0 auto 16px; border-radius: 50%;
+    border: 3px solid var(--border); border-top-color: var(--olive); animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .avatar { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--bg); border-radius: 12px; margin-bottom: 20px; }
+  .avatar .ini { width: 42px; height: 42px; border-radius: 50%; background: var(--olive-dark); color: #fff; font-weight: 800; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+  .avatar .foto { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; flex-shrink: 0; border: 2px solid var(--olive-soft); }
+  .avatar .meta .nm { font-weight: 700; font-size: 14px; }
+  .avatar .meta .role { font-size: 12px; color: var(--muted); }
+
+  @media (max-width: 560px) {
+    body { padding: 18px 12px 32px; }
+    .card { padding: 20px; }
+    .qtext { font-size: 16px; }
+    .alt { padding: 11px 12px 11px 14px; }
+    .picker button { width: 30px; height: 32px; font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><div class="loading"><div class="spinner"></div>Preparando sua avaliação...</div></div>
+
+<script>
+const TOKEN = window.location.pathname.split('/').pop();
+const API = '/api/public/dart/' + TOKEN;
+const VALORES = [1, 2, 3, 4];
+
+let INFO = null;
+let PERGUNTAS = [];
+let respostas = {};   // pergunta_id -> { 'alternativa_id': val }  (last selection per alt)
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+
+function ini(nome) {
+  if (!nome) return '?';
+  return nome.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+}
+
+function showLoading() {
+  document.getElementById('app').innerHTML =
+    '<div class="loading"><div class="spinner"></div>Carregando...</div>';
+}
+function showError(msg) {
+  document.getElementById('app').innerHTML =
+    `<div class="card"><div class="success"><div class="ok-circle" style="background:rgba(239,68,68,.1);color:#B91C1C">!</div><h1>Não foi possível continuar</h1><p>${esc(msg)}</p></div></div>`;
+}
+
+async function init() {
+  try {
+    const r = await fetch(API + '/info');
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || 'Avaliação indisponível.');
+    INFO = data;
+
+    if (INFO.ja_concluida) return renderConcluidaJa();
+    if (!INFO.pode_responder) {
+      if (INFO.status === 'expirada') return renderExpirada();
+      return showError('Esta avaliação não está disponível.');
+    }
+
+    const q = await fetch(API + '/perguntas');
+    const qd = await q.json().catch(() => ({}));
+    if (!q.ok) throw new Error(qd.detail || 'Não foi possível carregar as perguntas.');
+    PERGUNTAS = qd.perguntas;
+
+    // Restaura progresso parcial, se houver
+    try {
+      const p = await fetch(API + '/progresso');
+      if (p.ok) {
+        const pd = await p.json();
+        (pd.respostas || []).forEach(x => {
+          if (!x.pergunta_id || !x.alternativa_id) return;
+          respostas[x.pergunta_id] = respostas[x.pergunta_id] || {};
+          respostas[x.pergunta_id][x.alternativa_id] = x.pontuacao;
+        });
+      }
+    } catch (_) {}
+
+    renderIntro();
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+/* ── TELA INICIAL ── */
+function renderIntro() {
+  document.getElementById('app').innerHTML = `
+    <div class="brand"><img class="logo" src="/clinica-dialogos.png" alt="Clínica Diálogos"></div>
+    <div class="card">
+      <div class="eyebrow">Avaliação de Perfil Comportamental</div>
+      <h1>Teste DART</h1>
+      <div class="subtitle">Identifique suas principais tendências comportamentais.</div>
+      <div class="desc">Esta avaliação tem como objetivo identificar suas principais tendências comportamentais. Não existem respostas certas ou erradas. Responda pensando em como você normalmente age diante das situações apresentadas.</div>
+
+      <div class="avatar">
+        ${INFO.avaliando.photo_url
+          ? `<img class="foto" src="${esc(INFO.avaliando.photo_url)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+          : ''}
+        <div class="ini"${INFO.avaliando.photo_url ? ' style="display:none"' : ''}>${esc(ini(INFO.avaliando.nome))}</div>
+        <div class="meta">
+          <div class="nm">${esc(INFO.avaliando.nome)}</div>
+          <div class="role">${esc(INFO.avaliando.role || 'Colaborador')}${INFO.avaliando.dept ? ' · ' + esc(INFO.avaliando.dept) : ''}</div>
+        </div>
+      </div>
+
+      <div class="intro-block">
+        <h2>Instruções</h2>
+        <div class="desc">Em cada pergunta, distribua os valores 4, 3, 2 e 1 entre as quatro alternativas.</div>
+        <div class="rules">
+          <div class="rule"><div class="num">4</div><span class="desc2">Mais parecido comigo</span></div>
+          <div class="rule"><div class="num">3</div><span class="desc2">Parecido comigo</span></div>
+          <div class="rule"><div class="num">2</div><span class="desc2">Pouco parecido comigo</span></div>
+          <div class="rule"><div class="num">1</div><span class="desc2">Menos parecido comigo</span></div>
+        </div>
+        <div style="margin-top:12px;font-size:12px;color:var(--muted)">Cada número deve ser utilizado apenas uma vez em cada pergunta.</div>
+      </div>
+
+      <button class="btn" onclick="renderQuestion(0)">Começar avaliação</button>
+    </div>`;
+}
+
+/* ── QUESTÃO ATUAL ── */
+function renderQuestion(idx) {
+  if (idx < 0 || idx >= PERGUNTAS.length) return;
+  const q = PERGUNTAS[idx];
+  const sel = respostas[q.id] || {};
+
+  const usados = Object.values(sel).filter(v => VALORES.includes(v));
+
+  const altsHtml = q.alternativas.map(alt => {
+    const val = sel[alt.id];
+    const picker = VALORES.map(v => {
+      const isSel = val === v;
+      const disabled = (!isSel && usados.includes(v));
+      return `<button type="button" data-p="${v}" ${disabled ? 'disabled' : ''} class="${isSel ? 'sel' : ''}">${v}</button>`;
+    }).join('');
+    return `
+      <div class="alt">
+        <div class="txt">${esc(alt.texto)}</div>
+        <div class="picker" data-alt="${alt.id}">${picker}</div>
+      </div>`;
+  }).join('');
+
+  const completa = Object.keys(sel).length === 4;
+
+  document.getElementById('app').innerHTML = `
+    <div class="brand"><img class="logo" src="/clinica-dialogos.png" alt="Clínica Diálogos"></div>
+    <div class="card">
+      <div class="progress-head">
+        <div class="progress-label">Questão ${idx + 1} de ${PERGUNTAS.length}</div>
+        <div class="progress-curr">${Math.round(((idx + 1) / PERGUNTAS.length) * 100)}%</div>
+      </div>
+      <div class="bar"><div style="width:${Math.round(((idx + 1) / PERGUNTAS.length) * 100)}%"></div></div>
+
+      <div class="qindex">Questão ${idx + 1}</div>
+      <div class="qtext">${esc(q.texto)}</div>
+
+      <div class="alt-list" data-q="${q.id}">${altsHtml}</div>
+
+      <div class="hint-warn" id="hint">Distribua os valores 4, 3, 2 e 1 entre as quatro alternativas para continuar.</div>
+
+      <div class="nav-row">
+        ${idx > 0 ? '<button class="btn btn-outline" onclick="renderQuestion(' + (idx - 1) + ')">Anterior</button>' : ''}
+        ${idx < PERGUNTAS.length - 1
+          ? '<button class="btn" id="nextBtn" onclick="goNext(' + idx + ')" disabled>Próxima</button>'
+          : '<button class="btn" id="nextBtn" onclick="goFinal(' + idx + ')" disabled>Revisar respostas</button>'}
+      </div>
+    </div>`;
+
+  // Ligar seletores
+  document.querySelectorAll('.picker button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const picker = btn.closest('.picker');
+      const qid = picker.closest('.alt-list').dataset.q;
+      const aid = picker.dataset.alt;
+      const v = Number(btn.dataset.p);
+      respostas[qid] = respostas[qid] || {};
+
+      // Se estava selecionado outro valor nesta alternativa, libera ele
+      const antigo = respostas[qid][aid];
+      if (antigo !== undefined && antigo !== v) {
+        // permite reescolha; se outro já tomou v, limpa aquele
+        const tomador = Object.keys(respostas[qid]).find(k => respostas[qid][k] === v);
+        if (tomador) delete respostas[qid][tomador];
+      }
+      respostas[qid][aid] = v;
+
+      persist();
+      renderQuestion(idx);
+    });
+  });
+
+  const nextBtn = document.getElementById('nextBtn');
+  if (nextBtn) nextBtn.disabled = !completa;
+}
+
+function goNext(idx) { renderQuestion(idx + 1); }
+function goFinal(idx) { renderRevisao(); }
+
+/* ── REVISÃO ── */
+function renderRevisao() {
+  let rows = '';
+  PERGUNTAS.forEach((q, i) => {
+    const sel = respostas[q.id] || {};
+    const cont = Object.keys(sel).length;
+    rows += `
+      <div class="rule" style="justify-content:space-between">
+        <span class="desc2"><b>${i + 1}.</b> ${esc(q.texto)}</span>
+        <span class="num" style="background:${cont === 4 ? 'var(--olive-soft)' : 'rgba(239,68,68,.1)'};color:${cont === 4 ? 'var(--olive-dark)' : '#B91C1C'}">${cont}/4</span>
+      </div>`;
+  });
+  document.getElementById('app').innerHTML = `
+    <div class="brand"><img class="logo" src="/clinica-dialogos.png" alt="Clínica Diálogos"></div>
+    <div class="card">
+      <div class="eyebrow">Revisão</div>
+      <h1 style="font-size:22px;margin-bottom:6px">Você concluiu todas as perguntas.</h1>
+      <div class="desc" style="margin-bottom:16px">Revise suas respostas antes de finalizar. Depois de enviar a avaliação, ela será registrada no sistema.</div>
+      <div class="rules" style="grid-template-columns:1fr">${rows}</div>
+      <div class="nav-row">
+        <button class="btn btn-outline" onclick="renderQuestion(${PERGUNTAS.length - 1})">Voltar às perguntas</button>
+        <button class="btn" id="sendBtn" onclick="enviar()">Finalizar avaliação</button>
+      </div>
+      <div class="msg" id="msg"></div>
+    </div>`;
+}
+
+async function enviar() {
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('sendBtn');
+  msg.className = 'msg'; msg.style.display = 'none';
+  btn.disabled = true; btn.textContent = 'Enviando...';
+
+  const payload = [];
+  PERGUNTAS.forEach(q => {
+    const sel = respostas[q.id] || {};
+    Object.keys(sel).forEach(aid => {
+      payload.push({ pergunta_id: q.id, alternativa_id: aid, pontuacao: sel[aid] });
+    });
+  });
+
+  try {
+    const r = await fetch(API + '/respostas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ respostas: payload }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || 'Erro ao enviar a avaliação.');
+    renderSucesso();
+    window.scrollTo(0, 0);
+  } catch (err) {
+    msg.className = 'msg err'; msg.textContent = err.message;
+    btn.disabled = false; btn.textContent = 'Finalizar avaliação';
+  }
+}
+
+/* ── PERSISTÊNCIA PARCIAL ── */
+let _saving = false;
+function persist() {
+  if (_saving) return;
+  _saving = true;
+  const payload = [];
+  PERGUNTAS.forEach(q => {
+    const sel = respostas[q.id] || {};
+    Object.keys(sel).forEach(aid => payload.push({ pergunta_id: q.id, alternativa_id: aid, pontuacao: sel[aid] }));
+  });
+  fetch(API + '/progresso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ respostas: payload }) })
+    .catch(() => {})
+    .finally(() => { _saving = false; });
+}
+
+/* ── SUCESSO ── */
+function renderSucesso() {
+  document.getElementById('app').innerHTML = `
+    <div class="brand"><img class="logo" src="/clinica-dialogos.png" alt="Clínica Diálogos"></div>
+    <div class="card"><div class="success">
+      <div class="ok-circle">&#10003;</div>
+      <h1 style="font-size:22px">Avaliação concluída com sucesso.</h1>
+      <p>Suas respostas foram registradas.</p>
+      <p>Seu resultado está disponível para análise no sistema.</p>
+    </div></div>`;
+}
+
+function renderConcluidaJa() {
+  document.getElementById('app').innerHTML = `
+    <div class="brand"><img class="logo" src="/clinica-dialogos.png" alt="Clínica Diálogos"></div>
+    <div class="card"><div class="success">
+      <div class="ok-circle" style="background:var(--olive-soft);color:var(--olive-dark)">&#10003;</div>
+      <h1 style="font-size:22px">Avaliação já concluída.</h1>
+      <p>Suas respostas já foram registradas no sistema.</p>
+    </div></div>`;
+}
+
+function renderExpirada() {
+  document.getElementById('app').innerHTML = `
+    <div class="brand"><img class="logo" src="/clinica-dialogos.png" alt="Clínica Diálogos"></div>
+    <div class="card"><div class="success">
+      <div class="ok-circle" style="background:rgba(239,68,68,.1);color:#B91C1C">!</div>
+      <h1 style="font-size:22px">Prazo expirado.</h1>
+      <p>O período para realizar esta avaliação encerrou. Procure o RH para uma nova solicitação.</p>
+    </div></div>`;
+}
+
+init();
+</script>
+</body>
+</html>

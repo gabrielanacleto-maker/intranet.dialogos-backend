@@ -84,6 +84,81 @@ def _safe_update_existing(cursor, table, set_expr, where_expr):
     if _table_exists(cursor, table):
         cursor.execute(f"UPDATE {table} SET {set_expr} WHERE {where_expr}")
 
+# ── ESTRUTURA DE CARGOS MULTIEMPRESA ────────────────────────────────────────
+# Templates de inicialização por empresa (editáveis/removíveis pelo cliente;
+# nunca regras fixas do sistema).
+
+TRILHAS_PADRAO = ["Operacional", "Administrativa/Business", "Técnica", "Profissional", "Gestão"]
+SENIORIDADES_PADRAO = ["Não aplicável", "Júnior", "Pleno", "Sênior", "Especialista", "Lead/Líder Técnico"]
+NIVEIS_HIERARQUICOS_PADRAO = ["Operacional", "Profissional", "Supervisão", "Coordenação", "Gerência", "Diretoria", "Executivo"]
+
+_ESTRUTURA_TABLES = ("departamentos", "familias_cargo", "trilhas", "senioridades", "niveis_hierarquicos")
+
+def _criar_tabelas_estrutura(cursor):
+    for table in _ESTRUTURA_TABLES:
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table} (
+                id TEXT PRIMARY KEY,
+                empresa_id TEXT NOT NULL,
+                nome TEXT NOT NULL,
+                descricao TEXT DEFAULT '',
+                ordem INTEGER DEFAULT 0,
+                ativo INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_empresa ON {table}(empresa_id)")
+
+def _seed_catalogo(cursor, table, empresa_id, nomes):
+    cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE empresa_id=%s", (empresa_id,))
+    if cursor.fetchone()[0] > 0:
+        return
+    now = datetime.datetime.utcnow().isoformat()
+    cursor.executemany(
+        f"INSERT INTO {table} (id, empresa_id, nome, ordem, ativo, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+        [(str(uuid.uuid4()), empresa_id, nome, i, 1, now) for i, nome in enumerate(nomes)],
+    )
+
+def seed_estrutura_padrao(cursor, empresa_id):
+    """Popula trilhas/senioridades/níveis padrão de uma empresa (idempotente).
+    Chamado no init_db para empresas existentes e ao criar novas empresas."""
+    _seed_catalogo(cursor, "trilhas", empresa_id, TRILHAS_PADRAO)
+    _seed_catalogo(cursor, "senioridades", empresa_id, SENIORIDADES_PADRAO)
+    _seed_catalogo(cursor, "niveis_hierarquicos", empresa_id, NIVEIS_HIERARQUICOS_PADRAO)
+
+def _seed_dart_v1(cursor):
+    """Cria a versão v1 do teste (se não existir) e insere as 25 perguntas
+    com as alternativas associadas aos perfis. A ordem das alternativas é
+    embaralhada por pergunta (o perfil não fica sempre na mesma posição)."""
+    import random
+    from dart_data import DART_QUESTIONS_V1, DART_PERFIS
+
+    cursor.execute("SELECT id FROM dart_teste_versoes WHERE nome=%s", ("DART v1.0",))
+    row = cursor.fetchone()
+    if row:
+        return
+    versao_id = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    cursor.execute(
+        "INSERT INTO dart_teste_versoes (id, nome, total_questoes, ativo, created_at) VALUES (%s,%s,%s,%s,%s)",
+        (versao_id, "DART v1.0", len(DART_QUESTIONS_V1), 1, now),
+    )
+    qids = []
+    for i, q in enumerate(DART_QUESTIONS_V1):
+        qid = str(uuid.uuid4())
+        qids.append(qid)
+        cursor.execute(
+            "INSERT INTO dart_perguntas (id, versao_id, texto, status, ordem, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (qid, versao_id, q["texto"], "ativo", i + 1, now),
+        )
+        perfis_ord = list(DART_PERFIS)
+        random.shuffle(perfis_ord)
+        for j, perfil in enumerate(perfis_ord):
+            cursor.execute(
+                "INSERT INTO dart_alternativas (id, pergunta_id, texto, perfil, ordem, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+                (str(uuid.uuid4()), qid, q["alternativas"][perfil], perfil, j + 1, now),
+            )
+
 def init_db():
     conn = psycopg2.connect(DB_URL)
     c = conn.cursor()
@@ -109,7 +184,11 @@ def init_db():
         _safe_add_column(c, 'users', 'desligamento_obs', "desligamento_obs TEXT DEFAULT ''")
         _safe_add_column(c, 'users', 'cargo_id', "cargo_id TEXT DEFAULT NULL")
         _safe_add_column(c, 'users', 'senioridade', "senioridade TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'senioridade_id', "senioridade_id TEXT DEFAULT NULL")
+        _safe_add_column(c, 'users', 'departamento_id', "departamento_id TEXT DEFAULT NULL")
         _safe_add_column(c, 'users', 'empresa_id', "empresa_id TEXT DEFAULT NULL")
+        _safe_add_column(c, 'users', 'email', "email TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'dart', "dart TEXT DEFAULT ''")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS cargos (
@@ -147,8 +226,54 @@ def init_db():
             VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING""",
             ('orcoma', 'Orcoma Contabilidade', '', '', '', '', '2026-01-01T00:00:00'))
 
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS carreira_historico (
+                id TEXT PRIMARY KEY,
+                user_key TEXT NOT NULL,
+                cargo TEXT NOT NULL,
+                start_date TEXT DEFAULT '',
+                end_date TEXT DEFAULT '',
+                created_at TEXT DEFAULT ''
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_carreira_historico_user ON carreira_historico(user_key)")
+        _safe_add_column(c, 'carreira_historico', 'cargo_id', "cargo_id TEXT DEFAULT NULL")
+        _safe_add_column(c, 'carreira_historico', 'senioridade_id', "senioridade_id TEXT DEFAULT NULL")
+
         c.execute("UPDATE users SET empresa_id='orcoma' WHERE is_orcoma=1 AND (empresa_id IS NULL OR empresa_id='')")
         c.execute("UPDATE users SET empresa_id='dialogos' WHERE is_orcoma=0 AND (empresa_id IS NULL OR empresa_id='')")
+
+        # ── Estrutura de cargos multiempresa: tabelas, colunas e seeds ──
+        _criar_tabelas_estrutura(c)
+
+        for col in ("empresa_id", "departamento_id", "familia_id", "trilha_id",
+                    "nivel_hierarquico_id"):
+            _safe_add_column(c, 'cargos', col, f"{col} TEXT DEFAULT NULL")
+        _safe_add_column(c, 'cargos', 'descricao', "descricao TEXT DEFAULT ''")
+        _safe_add_column(c, 'cargos', 'ativo', "ativo INTEGER DEFAULT 1")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_cargos_empresa ON cargos(empresa_id)")
+
+        # Cargos existentes tornam-se dados iniciais da empresa atual
+        c.execute("UPDATE cargos SET empresa_id='dialogos' WHERE empresa_id IS NULL OR empresa_id=''")
+
+        # Templates padrão para cada empresa já existente (idempotente)
+        c.execute("SELECT id FROM empresas")
+        for emp_row in c.fetchall():
+            seed_estrutura_padrao(c, emp_row[0])
+
+        # Mapeia senioridade textual legada (''/jr/pl/sr) para senioridade_id
+        c.execute("""
+            UPDATE users u SET senioridade_id = s.id
+            FROM senioridades s
+            WHERE s.empresa_id = COALESCE(NULLIF(u.empresa_id,''),'dialogos')
+              AND u.senioridade_id IS NULL
+              AND (
+                   (COALESCE(u.senioridade,'')='' AND s.nome='Não aplicável')
+                OR (u.senioridade='jr' AND s.nome='Júnior')
+                OR (u.senioridade='pl' AND s.nome='Pleno')
+                OR (u.senioridade='sr' AND s.nome='Sênior')
+              )
+        """)
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS post_views (
@@ -191,11 +316,20 @@ def init_db():
                 target_user_key TEXT NOT NULL,
                 author_key TEXT NOT NULL,
                 text TEXT NOT NULL,
+                rating INTEGER,
+                is_private INTEGER DEFAULT 0,
                 reactions TEXT DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT
             )
         """)
+
+        # Migração: tabelas criadas antes das colunas rating/is_private existirem
+        try:
+            c.execute("ALTER TABLE colleague_feedback ADD COLUMN IF NOT EXISTS rating INTEGER")
+            c.execute("ALTER TABLE colleague_feedback ADD COLUMN IF NOT EXISTS is_private INTEGER DEFAULT 0")
+        except Exception:
+            pass
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -384,6 +518,20 @@ def init_db():
         _safe_add_column(c, 'ouvidoria', 'anonymous', "anonymous INTEGER DEFAULT 0")
 
         c.execute("""
+            CREATE TABLE IF NOT EXISTS melhoria_sugestoes (
+                id TEXT PRIMARY KEY,
+                author_key TEXT NOT NULL,
+                text TEXT NOT NULL,
+                is_done INTEGER DEFAULT 0,
+                done_reason TEXT DEFAULT '',
+                status_by_key TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_sugestoes_created ON melhoria_sugestoes(created_at DESC)")
+
+        c.execute("""
             CREATE TABLE IF NOT EXISTS task_comments (
                 id TEXT PRIMARY KEY,
                 tarefa_id TEXT NOT NULL,
@@ -543,6 +691,207 @@ def init_db():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_pdis_user ON pdis(user_key)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pdis_status ON pdis(status)")
+
+        _safe_add_column(c, 'pdis', 'template_id', "template_id TEXT DEFAULT NULL")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS pdi_templates (
+                id TEXT PRIMARY KEY,
+                titulo TEXT NOT NULL,
+                descricao TEXT DEFAULT '',
+                tipo TEXT NOT NULL DEFAULT 'desenvolvimento',
+                auto_onboarding INTEGER DEFAULT 0,
+                blocos TEXT DEFAULT '[]',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pdi_templates_tipo ON pdi_templates(tipo)")
+
+        # ── CONTRATAÇÃO ──
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS vagas (
+                id TEXT PRIMARY KEY,
+                titulo TEXT NOT NULL,
+                senioridade TEXT DEFAULT '',
+                descricao TEXT DEFAULT '',
+                salario TEXT DEFAULT '',
+                requisitos TEXT DEFAULT '',
+                expectativas TEXT DEFAULT '',
+                formacao TEXT DEFAULT '',
+                palavras_chave TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'em_analise',
+                motivo_rejeicao TEXT DEFAULT '',
+                created_by TEXT NOT NULL,
+                created_by_name TEXT DEFAULT '',
+                apply_token TEXT DEFAULT '',
+                deadline TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_vagas_status ON vagas(status)")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS vaga_candidaturas (
+                id TEXT PRIMARY KEY,
+                vaga_id TEXT NOT NULL,
+                nome TEXT NOT NULL,
+                email TEXT DEFAULT '',
+                telefone TEXT DEFAULT '',
+                respostas TEXT DEFAULT '{}',
+                disc TEXT DEFAULT '{}',
+                curriculo_url TEXT DEFAULT '',
+                curriculo_nome TEXT DEFAULT '',
+                score REAL,
+                score_breakdown TEXT DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'recebido',
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_candidaturas_vaga ON vaga_candidaturas(vaga_id)")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS experiencia_registros (
+                user_key TEXT PRIMARY KEY,
+                start_date TEXT DEFAULT '',
+                end_date TEXT DEFAULT '',
+                resultado TEXT DEFAULT '',
+                notas TEXT DEFAULT '',
+                updated_by TEXT DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                token TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER DEFAULT 0
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_reset_token ON password_reset_tokens(token)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_reset_email ON password_reset_tokens(email)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS pesquisas (
+                id TEXT PRIMARY KEY,
+                titulo TEXT NOT NULL,
+                pergunta TEXT NOT NULL,
+                escala_max INTEGER DEFAULT 10,
+                criado_por TEXT NOT NULL,
+                criado_por_nome TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                expires_at TEXT DEFAULT NULL
+            )
+        """)
+        # Migração: tabelas criadas antes da coluna is_active existir
+        try:
+            c.execute("ALTER TABLE pesquisas ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1")
+        except Exception:
+            pass
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pesquisas_active ON pesquisas(is_active, created_at)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS pesquisa_respostas (
+                id TEXT PRIMARY KEY,
+                pesquisa_id TEXT NOT NULL,
+                user_key TEXT NOT NULL,
+                nota INTEGER NOT NULL,
+                comentario TEXT DEFAULT '',
+                anonima INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(pesquisa_id, user_key)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_respostas_pesquisa ON pesquisa_respostas(pesquisa_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_respostas_user ON pesquisa_respostas(user_key)")
+
+        # ── DART — Avaliação de Perfil Comportamental ──
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS dart_teste_versoes (
+                id TEXT PRIMARY KEY,
+                nome TEXT NOT NULL,
+                total_questoes INTEGER DEFAULT 25,
+                ativo INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS dart_perguntas (
+                id TEXT PRIMARY KEY,
+                versao_id TEXT NOT NULL,
+                texto TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ativo',
+                ordem INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_perguntas_versao ON dart_perguntas(versao_id, status, ordem)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS dart_alternativas (
+                id TEXT PRIMARY KEY,
+                pergunta_id TEXT NOT NULL,
+                texto TEXT NOT NULL,
+                perfil TEXT NOT NULL,
+                ordem INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_alt_pergunta ON dart_alternativas(pergunta_id)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS dart_avaliacoes (
+                id TEXT PRIMARY KEY,
+                avaliando_id TEXT NOT NULL,
+                solicitante_id TEXT DEFAULT NULL,
+                token TEXT NOT NULL UNIQUE,
+                versao_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pendente',
+                data_inicio TEXT DEFAULT NULL,
+                data_conclusao TEXT DEFAULT NULL,
+                data_expiracao TEXT DEFAULT NULL,
+                pontuacao_analista INTEGER DEFAULT 0,
+                pontuacao_executor INTEGER DEFAULT 0,
+                pontuacao_planejador INTEGER DEFAULT 0,
+                pontuacao_comunicador INTEGER DEFAULT 0,
+                pontuacao_total INTEGER DEFAULT 0,
+                perfil_principal TEXT DEFAULT '',
+                segundo_perfil TEXT DEFAULT '',
+                terceiro_perfil TEXT DEFAULT '',
+                quarto_perfil TEXT DEFAULT '',
+                combinacao TEXT DEFAULT '',
+                codenome TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+        _safe_add_column(c, 'dart_avaliacoes', 'created_at', "created_at TEXT NOT NULL DEFAULT ''")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_avaliacoes_avaliando ON dart_avaliacoes(avaliando_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_avaliacoes_status ON dart_avaliacoes(status)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS dart_respostas (
+                id TEXT PRIMARY KEY,
+                avaliacao_id TEXT NOT NULL,
+                pergunta_id TEXT NOT NULL,
+                alternativa_id TEXT DEFAULT NULL,
+                perfil_da_alternativa TEXT NOT NULL,
+                pontuacao INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(avaliacao_id, pergunta_id)
+            )
+        """)
+        _safe_add_column(c, 'dart_respostas', 'alternativa_id', "alternativa_id TEXT DEFAULT NULL")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_respostas_avaliacao ON dart_respostas(avaliacao_id)")
+
+        # Seed idempotente da versão v1 + 25 perguntas
+        from dart_data import DART_QUESTIONS_V1, DART_PERFIS
+        _seed_dart_v1(c)
 
         conn.commit()
         print("Banco de dados inicializado.")

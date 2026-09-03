@@ -1,9 +1,10 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status, Request, Header, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
-import os, uuid, shutil, datetime, json, re, time, asyncio
+import os, io, uuid, shutil, datetime, json, re, time, asyncio
 from urllib.parse import urlparse, parse_qs, quote
 from pathlib import Path
 import logging
@@ -11,8 +12,12 @@ import logging
 from pydantic import BaseModel
 
 from models import *
-from database import get_db, init_db, get_db_context
+from database import get_db, init_db, get_db_context, seed_estrutura_padrao
+from deps import (security, get_current_user, get_current_user_from_token,
+                  get_optional_user, require_level, log_action, _invalidate_user_cache)
 from auth import create_token, verify_token, hash_password, check_password
+from rh_estrutura import router as rh_estrutura_router
+from dart import router as dart_router
 
 import cloudinary
 import cloudinary.uploader
@@ -214,6 +219,9 @@ cloudinary.config(
 
 app = FastAPI(title="Intranet Diálogos API", lifespan=lifespan)
 
+app.include_router(rh_estrutura_router)
+app.include_router(dart_router)
+
 CORS_ORIGINS = os.getenv("CORS_ORIGINS")
 if CORS_ORIGINS:
     origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
@@ -268,22 +276,6 @@ def _extract_socket_token(environ, auth):
     if qs.get("token"):
         return qs["token"][0]
     return None
-
-_user_cache = {}
-_USER_CACHE_TTL = 300
-
-def _get_user_cache(user_key):
-    entry = _user_cache.get(user_key)
-    if entry and time.time() - entry["ts"] < _USER_CACHE_TTL:
-        return entry["data"]
-    _user_cache.pop(user_key, None)
-    return None
-
-def _set_user_cache(user_key, data):
-    _user_cache[user_key] = {"data": data, "ts": time.time()}
-
-def _invalidate_user_cache(user_key):
-    _user_cache.pop(user_key, None)
 
 _presence = {}
 _PRESENCE_TIMEOUT = 60
@@ -404,87 +396,6 @@ def ws_emit_to_user(user_key: str, event: str, payload: dict):
     except Exception:
         logger.exception("socket_emit_to_user_failed event=%s user=%s", event, user_key)
 
-security = HTTPBearer(auto_error=False)
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-        if not credentials:
-            raise HTTPException(status_code=401, detail="Token ausente")
-        payload = verify_token(credentials.credentials)
-        if not payload:
-            raise HTTPException(status_code=401, detail="Token inválido ou expirado")
-
-        cached = _get_user_cache(payload["sub"])
-        if cached:
-            if cached.get("desligado"):
-                raise HTTPException(status_code=403, detail="Usuário desligado.")
-            return cached
-
-        with get_db_context() as db:
-            user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
-            if not user_row:
-                raise HTTPException(status_code=401, detail="Usuário não encontrado")
-            user_data = dict(user_row)
-            if user_data.get("desligado"):
-                raise HTTPException(status_code=403, detail="Usuário desligado.")
-            _set_user_cache(payload["sub"], user_data)
-            return user_data
-
-def get_current_user_from_token(token: str = Query(None), authorization: str = Header(None)):
-    jwt_token = None
-    if authorization and authorization.startswith('Bearer '):
-        jwt_token = authorization[7:]
-    elif token:
-        jwt_token = token
-    if not jwt_token:
-        raise HTTPException(status_code=401, detail="Token ausente")
-    payload = verify_token(jwt_token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Token inválido ou expirado")
-
-    cached = _get_user_cache(payload["sub"])
-    if cached:
-        if cached.get("desligado"):
-            raise HTTPException(status_code=403, detail="Usuário desligado.")
-        return cached
-
-    with get_db_context() as db:
-        user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
-        if not user_row:
-            raise HTTPException(status_code=401, detail="Usuário não encontrado")
-        user_data = dict(user_row)
-        if user_data.get("desligado"):
-            raise HTTPException(status_code=403, detail="Usuário desligado.")
-        _set_user_cache(payload["sub"], user_data)
-        return user_data
-
-def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-        if not credentials:
-            return None
-        try:
-            return get_current_user(credentials)
-        except:
-            return None
-
-def require_level(min_level: int):
-        def checker(user=Depends(get_current_user)):
-            if user["access_level"] < min_level:
-                raise HTTPException(status_code=403, detail="Acesso negado")
-            return user
-        return checker
-
-def log_action(db, actor_key, target_key, action_type, details=""):
-        db.execute(
-            "INSERT INTO security_logs (id, actor_key, target_key, action_type, details, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
-            (
-                str(uuid.uuid4()),
-                actor_key,
-                target_key,
-                action_type,
-                details,
-                datetime.datetime.utcnow().isoformat()
-            )
-        )
-
 def require_diretor(user):
     if not user.get("is_diretor"):
         raise HTTPException(status_code=403, detail="Apenas diretores podem executar esta ação.")
@@ -532,8 +443,13 @@ def can_access_social_room(db, room_id: str, user):
 
 @app.post("/api/auth/login")
 def login(body: LoginRequest, db=Depends(get_db)):
-        user = db.execute("SELECT * FROM users WHERE key=%s", (body.key.lower(),))
-        user = db.fetchone()
+        ident = body.key.strip().lower()
+        if "@" in ident:
+            user = db.execute("SELECT * FROM users WHERE LOWER(email)=%s", (ident,))
+            user = db.fetchone()
+        else:
+            user = db.execute("SELECT * FROM users WHERE key=%s", (ident,))
+            user = db.fetchone()
         if not user or not check_password(body.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
         if user.get("desligado"):
@@ -553,6 +469,11 @@ def login(body: LoginRequest, db=Depends(get_db)):
                 "nivel_dourado": bool(user.get("nivel_dourado")),
                 "org_position": user.get("org_position", "colaborador"),
                 "points": user["points"], "photo_url": user["photo_url"],
+                "cargo_id": user.get("cargo_id"),
+                "senioridade_id": user.get("senioridade_id"),
+                "departamento_id": user.get("departamento_id"),
+                "empresa_id": user.get("empresa_id"),
+                "dart": user.get("dart", ""),
             }
         }
 
@@ -573,7 +494,10 @@ def auth_me(user=Depends(get_current_user)):
         "hire_date": user.get("hire_date", ""),
         "cargo_id": user.get("cargo_id"),
         "senioridade": user.get("senioridade", ""),
+        "senioridade_id": user.get("senioridade_id"),
+        "departamento_id": user.get("departamento_id"),
         "empresa_id": user.get("empresa_id"),
+        "dart": user.get("dart", ""),
     }
 
 @app.post("/api/auth/change-password")
@@ -588,7 +512,103 @@ def change_password(body: ChangePasswordRequest, user=Depends(get_current_user),
         log_action(db, user["key"], user["key"], "Troca Voluntária", "Usuário alterou a própria senha")
         return {"ok": True}
 
-    # ── USERS ─────────────────────────────────────────────────────────────────────
+# ── FORGOT PASSWORD ─────────────────────────────────────────────────────────
+@app.post("/api/auth/forgot-password")
+def forgot_password(body: ForgotPasswordRequest, request: Request, db=Depends(get_db)):
+    email = body.email.strip().lower()
+    user = db.execute("SELECT * FROM users WHERE LOWER(email)=%s", (email,)).fetchone()
+    
+    # Sempre retorna sucesso por segurança
+    if not user:
+        return {"ok": True, "message": "Se o e-mail existir, você receberá um link de recuperação."}
+    
+    # Gerar token único
+    token = str(uuid.uuid4())
+    now = datetime.datetime.utcnow()
+    expires_at = now + datetime.timedelta(hours=1)
+    
+    # Salvar token no banco
+    db.execute(
+        "INSERT INTO password_reset_tokens (id, email, token, created_at, expires_at, used) VALUES (%s, %s, %s, %s, %s, 0)",
+        (str(uuid.uuid4()), email, token, now.isoformat(), expires_at.isoformat())
+    )
+    db.commit()
+    
+    # Enviar e-mail com Resend
+    try:
+        import resend
+        resend.api_key = os.getenv("RESEND_API_KEY")
+        
+        reset_link = f"{request.base_url}reset-password?token={token}"
+        
+        html_content = f"""<html><body style="font-family: Arial;">
+            <h2>Redefinição de Senha - Clínica Diálogos</h2>
+            <p>Olá, {user["name"]}!</p>
+            <p>Clique no link para redefinir sua senha:</p>
+            <a href="{reset_link}">Redefinir Senha</a>
+            <p>Este link expira em 1 hora.</p>
+        </body></html>"""
+        
+        params = {
+            "from": "Clínica Diálogos <noreply@axisdiálogos.com>",
+            "to": [email],
+            "subject": "Redefinição de Senha",
+            "html": html_content
+        }
+        
+        resend.Emails.send(params)
+    except Exception as e:
+        logger.error(f"Erro ao enviar e-mail: {str(e)}")
+    
+    return {"ok": True, "message": "Se o e-mail existir, você receberá um link."}
+
+@app.get("/api/auth/validate-reset-token")
+def validate_reset_token(token: str, db=Depends(get_db)):
+    token_data = db.execute(
+        "SELECT * FROM password_reset_tokens WHERE token=%s AND used=0",
+        (token,)
+    ).fetchone()
+    
+    if not token_data:
+        raise HTTPException(status_code=400, detail="Token inválido.")
+    
+    expires_at = datetime.datetime.fromisoformat(token_data["expires_at"])
+    if datetime.datetime.utcnow() > expires_at:
+        raise HTTPException(status_code=400, detail="Token expirado.")
+    
+    return {"valid": True, "email": token_data["email"]}
+
+@app.post("/api/auth/reset-password")
+def reset_password(body: ResetPasswordWithTokenRequest, db=Depends(get_db)):
+    token_data = db.execute(
+        "SELECT * FROM password_reset_tokens WHERE token=%s AND used=0",
+        (body.token,)
+    ).fetchone()
+    
+    if not token_data:
+        raise HTTPException(status_code=400, detail="Token inválido.")
+    
+    expires_at = datetime.datetime.fromisoformat(token_data["expires_at"])
+    if datetime.datetime.utcnow() > expires_at:
+        raise HTTPException(status_code=400, detail="Token expirado.")
+    
+    email = token_data["email"]
+    user = db.execute("SELECT * FROM users WHERE LOWER(email)=%s", (email.lower(),)).fetchone()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    
+    db.execute(
+        "UPDATE users SET password_hash=%s, password_changed=1 WHERE key=%s",
+        (hash_password(body.new_password), user["key"])
+    )
+    db.execute("UPDATE password_reset_tokens SET used=1 WHERE token=%s", (body.token,))
+    db.commit()
+    
+    log_action(db, user["key"], user["key"], "Reset de Senha", "Usuário redefiniu senha via e-mail")
+    return {"ok": True}
+
+# ── USERS ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/users")
 def list_users(user=Depends(get_current_user), db=Depends(get_db)):
@@ -614,12 +634,39 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
         key = body.key.lower().strip()
         if db.execute("SELECT 1 FROM users WHERE key=%s", (key,)).fetchone():
             raise HTTPException(status_code=400, detail="Usuário já existe.")
+        email = (body.email or "").strip().lower()
+        if email and db.execute("SELECT 1 FROM users WHERE LOWER(email)=%s", (email,)).fetchone():
+            raise HTTPException(status_code=400, detail="Este e-mail já está em uso.")
+        # ── Estrutura de cargos: valida vínculos e deriva nomes de exibição ──
+        empresa_final = body.empresa_id or ('orcoma' if body.is_orcoma else 'dialogos')
+        cargo_nome, dept_nome = "", ""
+        if body.cargo_id:
+            c_row = db.execute("SELECT nome, empresa_id FROM cargos WHERE id=%s", (body.cargo_id,)).fetchone()
+            if not c_row:
+                raise HTTPException(status_code=400, detail="Cargo não encontrado.")
+            if c_row["empresa_id"] and c_row["empresa_id"] != empresa_final:
+                raise HTTPException(status_code=400, detail="Cargo não pertence à empresa selecionada.")
+            cargo_nome = c_row["nome"]
+        if body.departamento_id:
+            d_row = db.execute("SELECT nome FROM departamentos WHERE id=%s", (body.departamento_id,)).fetchone()
+            if not d_row:
+                raise HTTPException(status_code=400, detail="Departamento não encontrado.")
+            dept_nome = d_row["nome"]
+        senioridade_id_final = body.senioridade_id or None
+        if senioridade_id_final:
+            s_ok = db.execute("SELECT 1 FROM senioridades WHERE id=%s AND empresa_id=%s",
+                              (senioridade_id_final, empresa_final)).fetchone()
+            if not s_ok:
+                raise HTTPException(status_code=400, detail="Senioridade inválida para esta empresa.")
+        role_final = (body.role or "").strip() or cargo_nome
+        dept_final = (body.dept or "").strip() or dept_nome
         db.execute("""INSERT INTO users
             (key, name, initials, role, dept, level, color, access_level,
             is_admin, is_admin_user, is_rh, is_ouvidor, is_diretor, is_leader, nivel_dourado, points,
-            password_hash, password_changed, photo_url, hire_date, org_position, is_orcoma, cargo_id, senioridade, empresa_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s)""",
-            (key, body.name, body.initials, body.role, body.dept,
+            password_hash, password_changed, photo_url, hire_date, org_position, is_orcoma,
+            cargo_id, senioridade, senioridade_id, departamento_id, empresa_id, email)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (key, body.name, body.initials, role_final, dept_final,
             body.level, body.color, body.access_level,
             1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
@@ -628,7 +675,9 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
             body.points, hash_password(body.password), "",
             body.hire_date or "", body.org_position or 'colaborador', 1 if body.is_orcoma else 0,
             body.cargo_id or None, body.senioridade or '',
-            body.empresa_id or ('orcoma' if body.is_orcoma else 'dialogos'))
+            senioridade_id_final, body.departamento_id or None,
+            body.empresa_id or ('orcoma' if body.is_orcoma else 'dialogos'),
+            email)
         )
         db.commit()
         log_action(db, user["key"], key, "Criação de Usuário", f"Criou usuário {body.name}")
@@ -637,6 +686,31 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
                 ntype="system", audience="all",
                 sender_key=user["key"], sender_name=user["name"],
                 reference_id=key, play_sound=True)
+        # ── Gatilho de Onboarding: aplica templates marcados como automático ──
+        try:
+            hoje = datetime.date.today().isoformat()
+            onboards = db.execute(
+                "SELECT * FROM pdi_templates WHERE auto_onboarding=1 ORDER BY created_at ASC"
+            ).fetchall()
+            for tpl in onboards:
+                prazo = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+                _criar_pdi_interno(
+                    db, user_key=key, titulo=tpl["titulo"], descricao=tpl["descricao"],
+                    data_inicio=hoje, data_fim=prazo,
+                    blocos=json.loads(tpl["blocos"] or "[]"),
+                    created_by=user["key"], template_id=tpl["id"]
+                )
+                log_action(db, user["key"], key, "Onboarding Automático",
+                           f"Aplicou o plano '{tpl['titulo']}' para {body.name}")
+                _notify(db, title="🚀 Bem-vindo(a)! Seu onboarding começou",
+                        message=f"O plano '{tpl['titulo']}' foi atribuído a você. Acesse Meus Planos de Desenvolvimento.",
+                        ntype="system", target_user_key=key,
+                        sender_key=user["key"], sender_name=user["name"],
+                        reference_id=key, play_sound=True)
+            if onboards:
+                db.commit()
+        except Exception as e:
+            logger.warning(f"Falha ao aplicar onboarding automático para {key}: {e}")
         return {"ok": True}
 
 @app.put("/api/users/{target_key}")
@@ -659,10 +733,31 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
                 raise HTTPException(status_code=403, detail="Apenas Admin Server (nível 3) pode definir nível 2 ou superior.")
             if body.is_admin or body.is_admin_user:
                 raise HTTPException(status_code=403, detail="Apenas Admin Server (nível 3) pode conceder permissões de admin.")
+        # ── Estrutura de cargos: valida vínculos e deriva nomes de exibição ──
+        empresa_efetiva = body.empresa_id if body.empresa_id is not None else target.get("empresa_id")
+        cargo_nome, dept_nome = "", ""
+        if body.cargo_id:
+            c_row = db.execute("SELECT nome FROM cargos WHERE id=%s", (body.cargo_id,)).fetchone()
+            if not c_row:
+                raise HTTPException(status_code=400, detail="Cargo não encontrado.")
+            cargo_nome = c_row["nome"]
+        if body.departamento_id is not None and body.departamento_id:
+            d_row = db.execute("SELECT nome FROM departamentos WHERE id=%s", (body.departamento_id,)).fetchone()
+            if not d_row:
+                raise HTTPException(status_code=400, detail="Departamento não encontrado.")
+            dept_nome = d_row["nome"]
+        if body.senioridade_id:
+            s_ok = db.execute(
+                "SELECT 1 FROM senioridades WHERE id=%s AND empresa_id=%s",
+                (body.senioridade_id, empresa_efetiva or 'dialogos')).fetchone()
+            if not s_ok:
+                raise HTTPException(status_code=400, detail="Senioridade inválida para esta empresa.")
+        role_final = (body.role or "").strip() or cargo_nome or (target.get("role") or "")
+        dept_final = (body.dept or "").strip() or dept_nome or (target.get("dept") or "")
         set_clause = """UPDATE users SET name=%s, initials=%s, role=%s, dept=%s, level=%s,
             color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, nivel_dourado=%s, points=%s,
             hire_date=%s, org_position=%s, is_orcoma=%s"""
-        params = [body.name, body.initials, body.role, body.dept, body.level,
+        params = [body.name, body.initials, role_final, dept_final, body.level,
             body.color, body.access_level,
             1 if body.is_admin else 0, 1 if body.is_admin_user else 0,
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
@@ -676,9 +771,23 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
         if body.senioridade is not None:
             set_clause += ", senioridade=%s"
             params.append(body.senioridade or '')
+        if body.senioridade_id is not None:
+            set_clause += ", senioridade_id=%s"
+            params.append(body.senioridade_id or None)
+        if body.departamento_id is not None:
+            set_clause += ", departamento_id=%s"
+            params.append(body.departamento_id or None)
         if body.empresa_id is not None:
             set_clause += ", empresa_id=%s"
             params.append(body.empresa_id or None)
+        if body.email is not None:
+            email = (body.email or "").strip().lower()
+            if email:
+                dup = db.execute("SELECT 1 FROM users WHERE LOWER(email)=%s AND key<>%s", (email, target_key)).fetchone()
+                if dup:
+                    raise HTTPException(status_code=400, detail="Este e-mail já está em uso.")
+            set_clause += ", email=%s"
+            params.append(email)
         set_clause += " WHERE key=%s"
         params.append(target_key)
         db.execute(set_clause, params)
@@ -779,59 +888,7 @@ def readmitir_user(target_key: str, user=Depends(require_level(2)), db=Depends(g
     log_action(db, user["key"], target_key, "Readmissão de Usuário", f"Readmitiu {target['name']}")
     return {"ok": True}
 
-@app.get("/api/cargos")
-def list_cargos(user=Depends(get_current_user), db=Depends(get_db)):
-    rows = db.execute("""
-        SELECT c.id, c.nome, c.nivel,
-               (SELECT COUNT(*) FROM users u WHERE u.cargo_id = c.id AND u.desligado = 0) AS usuarios
-        FROM cargos c
-        ORDER BY c.nivel ASC, c.nome ASC
-    """).fetchall()
-    return [{"id": r["id"], "nome": r["nome"], "nivel": r["nivel"], "usuarios": r["usuarios"] or 0} for r in rows]
-
-@app.post("/api/cargos")
-def create_cargo(body: CargoRequest, user=Depends(require_level(2)), db=Depends(get_db)):
-    nome = body.nome.strip()
-    if not nome:
-        raise HTTPException(status_code=400, detail="Nome do cargo é obrigatório.")
-    cargo_id = re.sub(r'[^a-z0-9]+', '-', nome.lower()).strip('-') or "cargo"
-    base = cargo_id
-    n = 1
-    while db.execute("SELECT 1 FROM cargos WHERE id=%s", (cargo_id,)).fetchone():
-        cargo_id = f"{base}-{n}"
-        n += 1
-    db.execute("INSERT INTO cargos (id, nome, nivel, created_at) VALUES (%s,%s,%s,%s)",
-               (cargo_id, nome, body.nivel, datetime.datetime.utcnow().isoformat()))
-    db.commit()
-    log_action(db, user["key"], cargo_id, "Criação de Cargo", f"Criou o cargo {nome}")
-    return {"id": cargo_id, "ok": True}
-
-@app.put("/api/cargos/{cargo_id}")
-def update_cargo(cargo_id: str, body: CargoRequest, user=Depends(require_level(2)), db=Depends(get_db)):
-    row = db.execute("SELECT * FROM cargos WHERE id=%s", (cargo_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Cargo não encontrado.")
-    nome = body.nome.strip()
-    if not nome:
-        raise HTTPException(status_code=400, detail="Nome do cargo é obrigatório.")
-    db.execute("UPDATE cargos SET nome=%s, nivel=%s WHERE id=%s", (nome, body.nivel, cargo_id))
-    db.commit()
-    log_action(db, user["key"], cargo_id, "Atualização de Cargo", f"Atualizou o cargo para {nome}")
-    return {"ok": True}
-
-@app.delete("/api/cargos/{cargo_id}")
-def delete_cargo(cargo_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
-    row = db.execute("SELECT * FROM cargos WHERE id=%s", (cargo_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Cargo não encontrado.")
-    affected = db.execute("SELECT key FROM users WHERE cargo_id=%s", (cargo_id,)).fetchall()
-    db.execute("UPDATE users SET cargo_id=NULL WHERE cargo_id=%s", (cargo_id,))
-    db.execute("DELETE FROM cargos WHERE id=%s", (cargo_id,))
-    db.commit()
-    for u in affected:
-        _invalidate_user_cache(u["key"])
-    log_action(db, user["key"], cargo_id, "Exclusão de Cargo", f"Excluiu o cargo {row['nome']}")
-    return {"ok": True}
+# ── CARGOS & ESTRUTURA MULTIEMPRESA: ver rh_estrutura.py ─────────────────────
 
 # ── CARGOS GERAIS ────────────────────────────────────────────────────────────
 
@@ -885,6 +942,67 @@ def delete_cargo_geral(cargo_id: str, user=Depends(require_level(2)), db=Depends
     log_action(db, user["key"], cargo_id, "Exclusão de Cargo Geral", f"Excluiu o cargo geral {row['nome']}")
     return {"ok": True}
 
+# ── HISTÓRICO DE CARREIRA ────────────────────────────────────────────────────
+
+def _validate_carreira_date(value: str, field: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        datetime.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Data inválida em {field}. Use o formato AAAA-MM-DD.")
+    return value
+
+@app.get("/api/carreira-historico/{user_key}")
+def list_carreira_historico(user_key: str, user=Depends(get_current_user), db=Depends(get_db)):
+    target = db.execute("SELECT key FROM users WHERE key=%s", (user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    rows = db.execute(
+        "SELECT id, user_key, cargo, start_date, end_date FROM carreira_historico WHERE user_key=%s ORDER BY start_date ASC",
+        (user_key,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/carreira-historico/{user_key}")
+def add_carreira_historico(user_key: str, body: CarreiraHistoricoRequest, user=Depends(require_level(2)), db=Depends(get_db)):
+    target = db.execute("SELECT key FROM users WHERE key=%s", (user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    cargo = body.cargo.strip()
+    if not cargo:
+        raise HTTPException(status_code=400, detail="Cargo é obrigatório.")
+    start_date = _validate_carreira_date(body.start_date, "data de início")
+    if not start_date:
+        raise HTTPException(status_code=400, detail="Data de início é obrigatória.")
+    end_date = _validate_carreira_date(body.end_date, "data de término")
+    if end_date and end_date < start_date:
+        raise HTTPException(status_code=400, detail="A data de término não pode ser anterior à data de início.")
+    if body.cargo_id and not db.execute("SELECT 1 FROM cargos WHERE id=%s", (body.cargo_id,)).fetchone():
+        raise HTTPException(status_code=400, detail="Cargo informado não existe.")
+    if body.senioridade_id and not db.execute("SELECT 1 FROM senioridades WHERE id=%s", (body.senioridade_id,)).fetchone():
+        raise HTTPException(status_code=400, detail="Senioridade informada não existe.")
+    entry_id = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO carreira_historico (id, user_key, cargo, start_date, end_date, created_at, cargo_id, senioridade_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        (entry_id, user_key, cargo, start_date, end_date, datetime.datetime.utcnow().isoformat(),
+         body.cargo_id or None, body.senioridade_id or None),
+    )
+    log_action(db, user["key"], user_key, "Registro de Histórico de Carreira", f"Registrou {cargo} ({start_date} a {end_date or 'atual'})")
+    db.commit()
+    return {"id": entry_id, "ok": True}
+
+@app.delete("/api/carreira-historico/{entry_id}")
+def delete_carreira_historico(entry_id: str, user=Depends(require_level(2)), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM carreira_historico WHERE id=%s", (entry_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Registro não encontrado.")
+    db.execute("DELETE FROM carreira_historico WHERE id=%s", (entry_id,))
+    log_action(db, user["key"], row["user_key"], "Exclusão de Histórico de Carreira", f"Removeu {row['cargo']} do histórico")
+    db.commit()
+    return {"ok": True}
+
 # ── EMPRESAS ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/empresas")
@@ -911,6 +1029,8 @@ def create_empresa(body: EmpresaRequest, user=Depends(require_level(2)), db=Depe
     db.execute("""INSERT INTO empresas (id, nome, cnpj, socios, endereco, logo, created_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s)""",
         (empresa_id, nome, body.cnpj, body.socios, body.endereco, body.logo, datetime.datetime.utcnow().isoformat()))
+    # Estrutura-padrão (templates editáveis) para a nova empresa
+    seed_estrutura_padrao(db, empresa_id)
     db.commit()
     log_action(db, user["key"], empresa_id, "Criação de Empresa", f"Criou a empresa {nome}")
     return {"id": empresa_id, "ok": True}
@@ -968,13 +1088,79 @@ def upload_empresa_logo(empresa_id: str, file: UploadFile = File(...), user=Depe
 
 # ── PDIs (Planos de Desenvolvimento Individual) ────────────────────────────────
 
+PDI_TIPOS_BLOCO = {"texto", "pdf", "video"}
+PDI_TIPOS_TEMPLATE = {"onboarding", "promocao", "desenvolvimento"}
+ALLOWED_PDI_EXTENSIONS = {".pdf", ".mp4", ".mov", ".webm"}
+MAX_PDI_FILE_SIZE = 100 * 1024 * 1024  # 100MB (vídeos)
+
+def _is_gestao(user):
+    """RH, admins, diretores e liderança (líder/gestor) podem gerir PDIs."""
+    return (
+        user.get("access_level", 0) >= 2
+        or bool(user.get("is_rh"))
+        or bool(user.get("is_admin"))
+        or bool(user.get("is_admin_user"))
+        or bool(user.get("is_diretor"))
+        or bool(user.get("is_leader"))
+        or user.get("org_position") in ("lider", "gestor")
+    )
+
 def _can_manage_pdi(db, user, target_user_key):
-    if user["access_level"] >= 2 or user["is_rh"] or user["is_admin"]:
+    # Gestão pode atribuir/editar/excluir PDIs de qualquer colaborador.
+    if _is_gestao(user):
         return True
-    target = db.execute("SELECT * FROM users WHERE key=%s", (target_user_key,)).fetchone()
-    if not target:
+    # Colaborador comum não cria nem edita PDIs; apenas marca blocos do próprio
+    # plano como concluídos via endpoint dedicado (/blocos/{bloco_id}/concluir).
+    return False
+
+def _normalize_bloco(b):
+    b = dict(b) if isinstance(b, dict) else {"titulo": str(b)}
+    tipo = b.get("tipo") if b.get("tipo") in PDI_TIPOS_BLOCO else ("pdf" if b.get("url") else "texto")
+    concluido = bool(b.get("concluido"))
+    return {
+        "id": str(b.get("id") or uuid.uuid4()),
+        "tipo": tipo,
+        "titulo": b.get("titulo") or "",
+        "descricao": b.get("descricao") or "",
+        "url": b.get("url") or "",
+        "concluido": concluido,
+        "concluido_em": (b.get("concluido_em") or "") if concluido else "",
+    }
+
+def _normalize_blocos(blocos):
+    return [_normalize_bloco(b) for b in (blocos or [])]
+
+def _pdi_progresso(blocos):
+    if not blocos:
+        return 0
+    done = sum(1 for b in blocos if b.get("concluido"))
+    return round(done * 100 / len(blocos))
+
+def _pdi_dict(r):
+    d = dict(r)
+    d["blocos"] = _normalize_blocos(json.loads(d.get("blocos") or "[]"))
+    d["progresso"] = _pdi_progresso(d["blocos"])
+    hoje = datetime.date.today().isoformat()
+    d["vencido"] = bool(d["status"] == "ativo" and d.get("data_fim") and d["data_fim"] < hoje)
+    return d
+
+def _get_pdi_or_404(db, pdi_id):
+    row = db.execute("SELECT * FROM pdis WHERE id=%s", (pdi_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="PDI não encontrado.")
+    return row
+
+def _auto_finalizar_se_completo(db, pdi_id, blocos_json):
+    """Finaliza automaticamente o PDI quando todos os blocos estão concluídos."""
+    blocos = json.loads(blocos_json)
+    if not blocos or any(not b.get("concluido") for b in blocos):
         return False
-    return target["key"] == user["key"]
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE pdis SET status='finalizado', data_conclusao=%s, updated_at=%s WHERE id=%s AND status='ativo'",
+        (now[:10], now, pdi_id)
+    )
+    return True
 
 @app.get("/api/pdis/meus")
 def list_meus_pdis(user=Depends(get_current_user), db=Depends(get_db)):
@@ -985,16 +1171,11 @@ def list_meus_pdis(user=Depends(get_current_user), db=Depends(get_db)):
         WHERE p.user_key = %s
         ORDER BY p.created_at DESC
     """, (user["key"],)).fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["blocos"] = json.loads(d.get("blocos") or "[]")
-        result.append(d)
-    return result
+    return [_pdi_dict(r) for r in rows]
 
 @app.get("/api/pdis")
 def list_pdis(user=Depends(get_current_user), db=Depends(get_db)):
-    if user["access_level"] < 2 and not user.get("is_rh") and not user.get("is_admin"):
+    if not _is_gestao(user):
         rows = db.execute("""
             SELECT p.*, u.name as user_name, u.role as user_role
             FROM pdis p
@@ -1009,36 +1190,48 @@ def list_pdis(user=Depends(get_current_user), db=Depends(get_db)):
             LEFT JOIN users u ON p.user_key = u.key
             ORDER BY p.created_at DESC
         """).fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["blocos"] = json.loads(d.get("blocos") or "[]")
-        result.append(d)
-    return result
+    return [_pdi_dict(r) for r in rows]
+
+def _criar_pdi_interno(db, *, user_key, titulo, descricao, data_inicio, data_fim,
+                       blocos, created_by, template_id=None, status="ativo"):
+    pdi_id = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    blocos_norm = _normalize_blocos(blocos)
+    db.execute("""
+        INSERT INTO pdis (id, user_key, titulo, descricao, data_inicio, data_fim, status, blocos, template_id, created_by, created_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        pdi_id, user_key, titulo, descricao,
+        data_inicio, data_fim, status,
+        json.dumps(blocos_norm), template_id, created_by, now, now
+    ))
+    return pdi_id
 
 @app.post("/api/pdis")
 def create_pdi(body: PdiRequest, user=Depends(get_current_user), db=Depends(get_db)):
     if not _can_manage_pdi(db, user, body.user_key):
-        raise HTTPException(status_code=403, detail="Sem permissão para criar PDI para este usuário.")
-    pdi_id = str(uuid.uuid4())
-    now = datetime.datetime.utcnow().isoformat()
-    db.execute("""
-        INSERT INTO pdis (id, user_key, titulo, descricao, data_inicio, data_fim, status, blocos, created_by, created_at, updated_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (
-        pdi_id, body.user_key, body.titulo, body.descricao,
-        body.data_inicio, body.data_fim, body.status or "ativo",
-        json.dumps(body.blocos or []), user["key"], now, now
-    ))
-    db.commit()
+        raise HTTPException(status_code=403, detail="Somente RH e liderança podem atribuir planos de desenvolvimento.")
+    target = db.execute("SELECT name FROM users WHERE key=%s", (body.user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário alvo não encontrado.")
+    pdi_id = _criar_pdi_interno(
+        db, user_key=body.user_key, titulo=body.titulo, descricao=body.descricao,
+        data_inicio=body.data_inicio, data_fim=body.data_fim,
+        blocos=body.blocos, created_by=user["key"], template_id=body.template_id,
+        status=body.status or "ativo"
+    )
     log_action(db, user["key"], body.user_key, "Criação de PDI", f"Criou PDI '{body.titulo}' para {body.user_key}")
+    _notify(db, title="📈 Novo plano de desenvolvimento",
+            message=f"{user['name']} atribuiu o plano '{body.titulo}' a você.",
+            ntype="system", target_user_key=body.user_key,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=pdi_id, play_sound=True)
+    db.commit()
     return {"id": pdi_id, "ok": True}
 
 @app.put("/api/pdis/{pdi_id}")
 def update_pdi(pdi_id: str, body: PdiUpdateRequest, user=Depends(get_current_user), db=Depends(get_db)):
-    row = db.execute("SELECT * FROM pdis WHERE id=%s", (pdi_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="PDI não encontrado.")
+    row = _get_pdi_or_404(db, pdi_id)
     if not _can_manage_pdi(db, user, row["user_key"]):
         raise HTTPException(status_code=403, detail="Sem permissão para editar este PDI.")
     set_clause = "updated_at=%s"
@@ -1066,25 +1259,264 @@ def update_pdi(pdi_id: str, body: PdiUpdateRequest, user=Depends(get_current_use
         params.append(body.justificativa_expiracao)
     if body.blocos is not None:
         set_clause += ", blocos=%s"
-        params.append(json.dumps(body.blocos))
+        params.append(json.dumps(_normalize_blocos(body.blocos)))
     set_clause += " WHERE id=%s"
     params.append(pdi_id)
     db.execute(f"UPDATE pdis SET {set_clause}", params)
-    db.commit()
     log_action(db, user["key"], row["user_key"], "Atualização de PDI", f"Atualizou PDI '{row['titulo']}'")
+    db.commit()
     return {"ok": True}
 
 @app.delete("/api/pdis/{pdi_id}")
 def delete_pdi(pdi_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    row = db.execute("SELECT * FROM pdis WHERE id=%s", (pdi_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="PDI não encontrado.")
+    row = _get_pdi_or_404(db, pdi_id)
     if not _can_manage_pdi(db, user, row["user_key"]):
         raise HTTPException(status_code=403, detail="Sem permissão para excluir este PDI.")
     db.execute("DELETE FROM pdis WHERE id=%s", (pdi_id,))
-    db.commit()
     log_action(db, user["key"], row["user_key"], "Exclusão de PDI", f"Excluiu PDI '{row['titulo']}'")
+    db.commit()
     return {"ok": True}
+
+# ── Blocos: conclusão individual + progresso ──────────────────────────────────
+
+@app.patch("/api/pdis/{pdi_id}/blocos/{bloco_id}/concluir")
+def concluir_bloco_pdi(pdi_id: str, bloco_id: str, body: PdiBlocoConcluirRequest,
+                       user=Depends(get_current_user), db=Depends(get_db)):
+    row = _get_pdi_or_404(db, pdi_id)
+    eh_dono = row["user_key"] == user["key"]
+    if not eh_dono and not _is_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para atualizar este plano.")
+    if row["status"] == "expirado":
+        raise HTTPException(status_code=400, detail="Este plano está expirado.")
+    blocos = _normalize_blocos(json.loads(row["blocos"] or "[]"))
+    bloco = next((b for b in blocos if b["id"] == bloco_id), None)
+    if not bloco:
+        raise HTTPException(status_code=404, detail="Bloco não encontrado neste plano.")
+    bloco["concluido"] = bool(body.concluido)
+    bloco["concluido_em"] = datetime.datetime.utcnow().isoformat()[:10] if body.concluido else ""
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute("UPDATE pdis SET blocos=%s, updated_at=%s WHERE id=%s",
+               (json.dumps(blocos), now, pdi_id))
+    finalizado = _auto_finalizar_se_completo(db, pdi_id, json.dumps(blocos))
+    progresso = _pdi_progresso(blocos)
+    if finalizado:
+        log_action(db, user["key"], row["user_key"], "Conclusão de PDI",
+                   f"Plano '{row['titulo']}' concluído 100% por {user['name']}")
+        _notify(db, title="🎉 Plano concluído",
+                message=f"{user['name']} concluiu 100% do plano '{row['titulo']}'.",
+                ntype="system", target_user_key=row["created_by"],
+                sender_key=user["key"], sender_name=user["name"],
+                reference_id=pdi_id, play_sound=True)
+    else:
+        log_action(db, user["key"], row["user_key"], "Bloco de PDI",
+                   f"{'Concluiu' if body.concluido else 'Reabriu'} bloco '{bloco['titulo']}' em '{row['titulo']}' ({progresso}%)")
+    db.commit()
+    novo_status = "finalizado" if finalizado else row["status"]
+    return {"ok": True, "progresso": progresso, "status": novo_status}
+
+# ── Templates de PDI (Onboarding, Promoção etc.) ───────────────────────────────
+
+def _template_dict(r):
+    d = dict(r)
+    d["blocos"] = _normalize_blocos(json.loads(d.get("blocos") or "[]"))
+    return d
+
+@app.get("/api/pdis-templates")
+def list_pdi_templates(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""
+        SELECT t.*, u.name as created_by_name
+        FROM pdi_templates t
+        LEFT JOIN users u ON t.created_by = u.key
+        ORDER BY t.created_at DESC
+    """).fetchall()
+    return [_template_dict(r) for r in rows]
+
+@app.post("/api/pdis-templates")
+def create_pdi_template(body: PdiTemplateRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _is_gestao(user):
+        raise HTTPException(status_code=403, detail="Somente RH e liderança podem criar templates de PDI.")
+    if body.tipo not in PDI_TIPOS_TEMPLATE:
+        raise HTTPException(status_code=400, detail="Tipo inválido. Use: onboarding, promocao ou desenvolvimento.")
+    tpl_id = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute("""
+        INSERT INTO pdi_templates (id, titulo, descricao, tipo, auto_onboarding, blocos, created_by, created_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (tpl_id, body.titulo, body.descricao, body.tipo,
+          1 if body.auto_onboarding else 0,
+          json.dumps(_normalize_blocos(body.blocos)), user["key"], now, now))
+    if body.auto_onboarding:
+        db.execute("UPDATE pdi_templates SET auto_onboarding=0 WHERE tipo=%s AND id != %s AND auto_onboarding=1",
+                   (body.tipo, tpl_id))
+    log_action(db, user["key"], user["key"], "Criação de Template de PDI", f"Criou template '{body.titulo}' ({body.tipo})")
+    db.commit()
+    return {"id": tpl_id, "ok": True}
+
+@app.put("/api/pdis-templates/{template_id}")
+def update_pdi_template(template_id: str, body: PdiTemplateRequest,
+                        user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM pdi_templates WHERE id=%s", (template_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Template não encontrado.")
+    if not _is_gestao(user):
+        raise HTTPException(status_code=403, detail="Somente RH e liderança podem editar templates de PDI.")
+    if body.tipo not in PDI_TIPOS_TEMPLATE:
+        raise HTTPException(status_code=400, detail="Tipo inválido. Use: onboarding, promocao ou desenvolvimento.")
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute("""
+        UPDATE pdi_templates SET titulo=%s, descricao=%s, tipo=%s, auto_onboarding=%s, blocos=%s, updated_at=%s
+        WHERE id=%s
+    """, (body.titulo, body.descricao, body.tipo,
+          1 if body.auto_onboarding else 0,
+          json.dumps(_normalize_blocos(body.blocos)), now, template_id))
+    if body.auto_onboarding:
+        db.execute("UPDATE pdi_templates SET auto_onboarding=0 WHERE tipo=%s AND id != %s AND auto_onboarding=1",
+                   (body.tipo, template_id))
+    log_action(db, user["key"], user["key"], "Atualização de Template de PDI", f"Atualizou template '{body.titulo}'")
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/pdis-templates/{template_id}")
+def delete_pdi_template(template_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute("SELECT * FROM pdi_templates WHERE id=%s", (template_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Template não encontrado.")
+    if not _is_gestao(user):
+        raise HTTPException(status_code=403, detail="Somente RH e liderança podem excluir templates de PDI.")
+    db.execute("DELETE FROM pdi_templates WHERE id=%s", (template_id,))
+    log_action(db, user["key"], user["key"], "Exclusão de Template de PDI", f"Excluiu template '{row['titulo']}'")
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/pdis-templates/{template_id}/aplicar")
+def aplicar_pdi_template(template_id: str, body: PdiTemplateAplicarRequest,
+                         user=Depends(get_current_user), db=Depends(get_db)):
+    tpl = db.execute("SELECT * FROM pdi_templates WHERE id=%s", (template_id,)).fetchone()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template não encontrado.")
+    if not _can_manage_pdi(db, user, body.user_key):
+        raise HTTPException(status_code=403, detail="Somente RH e liderança podem atribuir planos de desenvolvimento.")
+    target = db.execute("SELECT name FROM users WHERE key=%s", (body.user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário alvo não encontrado.")
+    pdi_id = _criar_pdi_interno(
+        db, user_key=body.user_key, titulo=tpl["titulo"], descricao=tpl["descricao"],
+        data_inicio=body.data_inicio, data_fim=body.data_fim,
+        blocos=json.loads(tpl["blocos"] or "[]"),
+        created_by=user["key"], template_id=template_id
+    )
+    log_action(db, user["key"], body.user_key, "Atribuição de PDI (Template)",
+               f"Atribuiu o template '{tpl['titulo']}' para {body.user_key}")
+    _notify(db, title="📈 Novo plano de desenvolvimento",
+            message=f"{user['name']} atribuiu o plano '{tpl['titulo']}' a você.",
+            ntype="system", target_user_key=body.user_key,
+            sender_key=user["key"], sender_name=user["name"],
+            reference_id=pdi_id, play_sound=True)
+    db.commit()
+    return {"id": pdi_id, "ok": True}
+
+# ── Upload de material (PDF/vídeo) para blocos ─────────────────────────────────
+
+@app.post("/api/pdis/upload-material")
+def upload_pdi_material(file: UploadFile = File(...), user=Depends(get_current_user)):
+    if not _is_gestao(user):
+        raise HTTPException(status_code=403, detail="Somente RH e liderança podem enviar materiais de PDI.")
+    _check_upload_rate_limit(user["key"])
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Arquivo sem nome")
+    ext = Path(file.filename).suffix.lower()
+    if _is_executable(ext):
+        raise HTTPException(status_code=400, detail="Arquivos executáveis não são permitidos")
+    if ext not in ALLOWED_PDI_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Extensão {ext} não permitida. Use PDF ou vídeo (mp4/mov/webm).")
+    if file.size and file.size > MAX_PDI_FILE_SIZE:
+        raise HTTPException(status_code=400, detail=f"Arquivo muito grande (máx 100MB)")
+    try:
+        unique_name = f"{uuid.uuid4()}{ext}"
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="dialogos/pdis",
+            public_id=unique_name.replace(ext, ""),
+            resource_type="auto"
+        )
+        url = result["secure_url"]
+        return {"ok": True, "url": url, "name": file.filename,
+                "tipo": "pdf" if ext == ".pdf" else "video"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── Certificado de conclusão (download manual) ─────────────────────────────────
+
+@app.get("/api/pdis/{pdi_id}/certificado")
+def certificado_pdi(pdi_id: str, user=Depends(get_current_user_from_token), db=Depends(get_db)):
+    row = _get_pdi_or_404(db, pdi_id)
+    if row["user_key"] != user["key"] and not _is_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para baixar este certificado.")
+    blocos = _normalize_blocos(json.loads(row["blocos"] or "[]"))
+    completo = row["status"] == "finalizado" or (bool(blocos) and all(b["concluido"] for b in blocos))
+    if not completo:
+        raise HTTPException(status_code=400, detail="Certificado disponível apenas após concluir 100% do plano.")
+    owner = db.execute("SELECT * FROM users WHERE key=%s", (row["user_key"],)).fetchone()
+    nome_colaborador = owner["name"] if owner else row["user_key"]
+
+    from fpdf import FPDF
+    from io import BytesIO
+    from starlette.responses import Response as StarletteResponse
+
+    pdf = FPDF(orientation="L", format="A4")
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=False)
+
+    font_path = os.path.join(os.path.dirname(__file__), "fonts", "NotoEmoji-Regular.ttf")
+    pdf.add_font("NotoEmoji", "", font_path)
+
+    logo_path = os.path.join("..", "frontend", "public", "logo-clinica-fivecon.ico")
+    if os.path.exists(logo_path):
+        pdf.image(logo_path, x=137, y=14, w=26)
+
+    pdf.set_draw_color(107, 123, 58)
+    pdf.set_line_width(1.2)
+    pdf.rect(10, 10, 277, 190)
+
+    pdf.ln(24)
+    pdf.set_font("NotoEmoji", size=28)
+    pdf.cell(0, 16, "Certificado de Conclusão", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(6)
+    pdf.set_font("NotoEmoji", size=13)
+    pdf.cell(0, 10, "Certificamos que", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(4)
+    pdf.set_font("NotoEmoji", size=22)
+    pdf.cell(0, 12, nome_colaborador, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(4)
+    pdf.set_font("NotoEmoji", size=13)
+    pdf.cell(0, 10, "concluiu com êxito o plano de desenvolvimento:", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(3)
+    pdf.set_font("NotoEmoji", size=17)
+    pdf.multi_cell(0, 10, row["titulo"], align="C")
+    pdf.ln(2)
+    pdf.set_font("NotoEmoji", size=11)
+    total = len(blocos)
+    pdf.cell(0, 7, f"{total} bloco(s) de aprendizagem concluído(s)", new_x="LMARGIN", new_y="NEXT", align="C")
+    conclusao = row.get("data_conclusao") or datetime.date.today().isoformat()
+    periodo = f"Período: {row['data_inicio']} a {conclusao}"
+    pdf.cell(0, 7, periodo, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(10)
+    pdf.set_font("NotoEmoji", size=10)
+    pdf.cell(0, 7, "Clínica Diálogos - Plataforma de Gestão de Pessoas", new_x="LMARGIN", new_y="NEXT", align="C")
+    codigo = f"Código de verificação: {pdi_id}"
+    pdf.cell(0, 6, codigo, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(0, 6, f"Emitido em: {datetime.datetime.now().strftime('%d/%m/%Y')}", new_x="LMARGIN", new_y="NEXT", align="C")
+
+    buf = BytesIO()
+    pdf.output(buf)
+    nome_arquivo = f"certificado_{nome_colaborador.replace(' ', '_')}_{datetime.date.today().isoformat()}.pdf"
+    return StarletteResponse(
+        content=buf.getvalue(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'}
+    )
 
 @app.post("/api/users/me/photo")
 def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user), db=Depends(get_db)):
@@ -1122,6 +1554,41 @@ def update_about_me(body: dict, user=Depends(get_current_user), db=Depends(get_d
     db.commit()
     _invalidate_user_cache(user["key"])
     return {"ok": True}
+
+# ── DART (Perfis Comportamentais) ────────────────────────────────────────────
+
+DART_DIMENSOES_VALIDAS = {"analista", "executor", "comunicador", "planejador"}
+
+def _validate_dart(dart: str):
+    """Valida a chave do perfil DART. Retorna a chave canônica ordenada."""
+    dims = [d.strip().lower() for d in dart.split("+") if d.strip()]
+    if not dims or len(dims) > 4:
+        return None
+    if len(set(dims)) != len(dims) or not set(dims).issubset(DART_DIMENSOES_VALIDAS):
+        return None
+    return "+".join(sorted(dims))
+
+@app.put("/api/users/{target_key}/comportamental")
+def set_comportamental(target_key: str, body: ComportamentalRequest,
+                       user=Depends(get_current_user), db=Depends(get_db)):
+    target = db.execute("SELECT * FROM users WHERE key=%s", (target_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    if user["key"] != target_key and user["access_level"] < 2:
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    dart = (body.dart or "").strip()
+    if dart:
+        canonical = _validate_dart(dart)
+        if not canonical:
+            raise HTTPException(status_code=400, detail="Perfil comportamental inválido.")
+    else:
+        canonical = ""
+    db.execute("UPDATE users SET dart=%s WHERE key=%s", (canonical, target_key))
+    db.commit()
+    _invalidate_user_cache(target_key)
+    log_action(db, user["key"], target_key, "Perfil Comportamental",
+               f"Definiu perfil DART: {canonical or '(removido)'}")
+    return {"ok": True, "dart": canonical}
 
 
 @app.delete("/api/mural/{item_id}")
@@ -1650,7 +2117,7 @@ def _can_publish_comunicado(user) -> bool:
     return bool(
         user.get("is_admin") or user.get("is_admin_user") or
         user.get("is_rh") or user.get("is_diretor") or user.get("is_leader") or
-        role in ("diretora", "diretor", "líder", "lider", "admin", "rh")
+        role in ("diretora", "diretor", "líder", "lider", "admin", "rh", "ceo")
     )
 
 
@@ -2099,22 +2566,29 @@ def create_evaluation(body: dict, user=Depends(get_current_user), db=Depends(get
 @app.get("/api/colleague-feedback")
 def list_colleague_feedback(limit: int = 50, offset: int = 0,
                             user=Depends(get_current_user), db=Depends(get_db)):
+    # Privados: visíveis apenas para autor e destinatário
+    visibility = "(COALESCE(cf.is_private,0) = 0 OR cf.author_key = %s OR cf.target_user_key = %s)"
     rows = db.execute(
-        """SELECT cf.*,
+        f"""SELECT cf.*,
             u.name AS author_name,
             u.initials AS author_initials,
             u.color   AS author_color,
             u.photo_url AS author_photo
            FROM colleague_feedback cf
            LEFT JOIN users u ON u.key = cf.author_key
+           WHERE {visibility}
            ORDER BY cf.created_at DESC LIMIT %s OFFSET %s""",
-        (limit, offset)
+        (user["key"], user["key"], limit, offset)
     ).fetchall()
-    total = db.execute("SELECT COUNT(*) FROM colleague_feedback").fetchone()["count"]
+    total = db.execute(
+        f"SELECT COUNT(*) AS cnt FROM colleague_feedback cf WHERE {visibility}",
+        (user["key"], user["key"])
+    ).fetchone()["cnt"]
     result = []
     for r in rows:
         entry = dict(r)
         entry["reactions"] = json.loads(entry.get("reactions") or "{}")
+        entry["is_private"] = bool(entry.get("is_private"))
         can_delete = user["key"] == entry["author_key"] or user.get("is_admin")
         entry["can_delete"] = can_delete
         result.append(entry)
@@ -2122,22 +2596,25 @@ def list_colleague_feedback(limit: int = 50, offset: int = 0,
 
 @app.get("/api/colleague-feedback/{target_key}")
 def get_colleague_feedback(target_key: str, user=Depends(get_current_user), db=Depends(get_db)):
+    # Privados: visíveis apenas para autor e destinatário
+    visibility = "(COALESCE(cf.is_private,0) = 0 OR cf.author_key = %s OR cf.target_user_key = %s)"
     rows = db.execute(
-        """SELECT cf.*,
+        f"""SELECT cf.*,
             u.name AS author_name,
             u.initials AS author_initials,
             u.color   AS author_color,
             u.photo_url AS author_photo
            FROM colleague_feedback cf
            LEFT JOIN users u ON u.key = cf.author_key
-           WHERE cf.target_user_key=%s
+           WHERE cf.target_user_key=%s AND {visibility}
            ORDER BY cf.created_at DESC LIMIT 50""",
-        (target_key,)
+        (target_key, user["key"], user["key"])
     ).fetchall()
     result = []
     for r in rows:
         entry = dict(r)
         entry["reactions"] = json.loads(entry.get("reactions") or "{}")
+        entry["is_private"] = bool(entry.get("is_private"))
         can_delete = user["key"] == entry["author_key"] or user.get("is_admin")
         entry["can_delete"] = can_delete
         result.append(entry)
@@ -2148,6 +2625,7 @@ def create_colleague_feedback(body: dict, user=Depends(get_current_user), db=Dep
     target_key = body.get("target_user_key") or body.get("target_key", "")
     text = body.get("text", "").strip()[:6000]
     rating = body.get("rating")
+    is_private = bool(body.get("is_private", False))
     if not text:
         raise HTTPException(status_code=400, detail="Feedback não pode ser vazio.")
     if not target_key:
@@ -2156,37 +2634,50 @@ def create_colleague_feedback(body: dict, user=Depends(get_current_user), db=Dep
     fid = str(uuid.uuid4())
     now = datetime.datetime.utcnow().isoformat()
 
+    clean_preview = _sanitize_text(text)
+    preview = clean_preview[:80] + ("…" if len(clean_preview) > 80 else "")
+
     is_todos = target_key == "todos" or target_key == "@todos"
 
     if is_todos:
         if user["key"] == "system":
             raise HTTPException(status_code=400, detail="Operação inválida.")
+        # @todos é público por natureza: is_private é ignorado
         db.execute(
             "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, reactions, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
             (fid, "@todos", user["key"], text, "{}", now)
         )
         log_audit(db, user["key"], "colleague_feedback_create", "@todos", f"Feedback para o time de {user['name']}")
         _notify(db, title="💬 Feedback para o time",
-                message=f"{user['name']} enviou um feedback para @todos",
+                message=f"{user['name']} enviou um feedback: \"{preview}\"",
                 ntype="celebration", audience="all",
                 sender_key=user["key"], sender_name=user["name"],
                 reference_id=fid, play_sound=False)
+        _log_atividade(db, "feedback", user["key"],
+                       f"{user['name']} enviou um feedback para o time: \"{preview}\"")
     else:
         if user["key"] == target_key:
             raise HTTPException(status_code=400, detail="Você não pode avaliar a si mesmo.")
-        target = db.execute("SELECT 1 FROM users WHERE key=%s", (target_key,)).fetchone()
-        if not target:
+        trow = db.execute("SELECT name FROM users WHERE key=%s", (target_key,)).fetchone()
+        if not trow:
             raise HTTPException(status_code=404, detail="Usuário não encontrado.")
         db.execute(
-            "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, rating, reactions, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-            (fid, target_key, user["key"], text, rating, "{}", now)
+            "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, rating, reactions, created_at, is_private) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (fid, target_key, user["key"], text, rating, "{}", now, 1 if is_private else 0)
         )
-        log_audit(db, user["key"], "colleague_feedback_create", target_key, f"Feedback de {user['name']}")
+        log_audit(db, user["key"], "colleague_feedback_create", target_key,
+                  f"Feedback {'privado ' if is_private else ''}de {user['name']} para {trow['name']}")
         _notify(db, title="💬 Feedback recebido",
-                message=f"{user['name']} enviou um feedback para você",
+                message=(f"🔒 {user['name']} enviou um feedback privado: \"{preview}\""
+                         if is_private else
+                         f"{user['name']} enviou um feedback: \"{preview}\""),
                 ntype="feedback", target_user_key=target_key,
                 sender_key=user["key"], sender_name=user["name"],
                 reference_id=fid, play_sound=False)
+        # Feedback privado não aparece no feed público de atividades
+        if not is_private:
+            _log_atividade(db, "feedback", user["key"],
+                           f"{user['name']} enviou um feedback para {trow['name']}: \"{preview}\"")
 
     db.commit()
     return {"ok": True, "id": fid}
@@ -2855,6 +3346,87 @@ def respond_ouvidoria(oid: str, body: OuvidoriaResponseRequest, user=Depends(get
     db.commit()
     return {"ok": True}
 
+# ── SUGESTÕES DE MELHORIAS ────────────────────────────────────────────────────
+
+SUGESTOES_DEV_KEY = "gabriel"
+
+@app.get("/api/sugestoes")
+def get_sugestoes(user=Depends(get_current_user), db=Depends(get_db)):
+    is_dev = user["key"] == SUGESTOES_DEV_KEY
+    where = "" if is_dev else "WHERE s.author_key=%s"
+    params = None if is_dev else (user["key"],)
+    rows = db.execute(f"""
+        SELECT s.id, s.author_key, s.text, s.is_done, s.done_reason,
+               s.status_by_key, s.updated_at, s.created_at,
+               u.name AS author_name, u.initials AS author_initials,
+               u.color AS author_color, u.photo_url AS author_photo_url
+        FROM melhoria_sugestoes s
+        LEFT JOIN users u ON u.key = s.author_key
+        {where}
+        ORDER BY s.created_at ASC
+    """, params).fetchall()
+    result = []
+    for r in rows:
+        item = dict(r)
+        item["is_done"] = bool(item.get("is_done"))
+        item["can_manage"] = user["key"] == SUGESTOES_DEV_KEY
+        if not item.get("author_name"):
+            item["author_name"] = item.get("author_key") or "Usuário removido"
+            item["author_initials"] = "?"
+            item["author_color"] = "av-gold"
+            item["author_photo_url"] = ""
+        result.append(item)
+    return result
+
+@app.post("/api/sugestoes")
+def create_sugestao(body: SugestaoRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Escreva sua sugestão antes de enviar.")
+    if len(text) > 500:
+        raise HTTPException(status_code=422, detail="Sugestão muito longa (máx. 500 caracteres).")
+    sid = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "INSERT INTO melhoria_sugestoes (id, author_key, text, created_at) VALUES (%s,%s,%s,%s)",
+        (sid, user["key"], text, now)
+    )
+    db.commit()
+    ws_emit("sugestoes_updated", {"type": "created", "id": sid})
+    return {"ok": True, "id": sid}
+
+@app.patch("/api/sugestoes/{sid}/status")
+def update_sugestao_status(sid: str, body: SugestaoStatusRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if user["key"] != SUGESTOES_DEV_KEY:
+        raise HTTPException(status_code=403, detail="Apenas o desenvolvedor pode atualizar o status.")
+    row = db.execute("SELECT * FROM melhoria_sugestoes WHERE id=%s", (sid,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Sugestão não encontrada")
+    reason = (body.reason or "").strip()
+    now = datetime.datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE melhoria_sugestoes SET is_done=%s, done_reason=%s, status_by_key=%s, updated_at=%s WHERE id=%s",
+        (int(body.is_done), reason, user["key"], now, sid)
+    )
+    log_audit(db, user["key"], "sugestao_status", None,
+              f"Status {'feito' if body.is_done else 'pendente'} | motivo: {reason or '-'}")
+    if row["author_key"] != user["key"]:
+        if body.is_done:
+            _notify(db, title="✅ Sua sugestão foi implementada",
+                    message=reason or f"{user['name']} marcou sua sugestão como feita",
+                    ntype="system", target_user_key=row["author_key"],
+                    sender_key=user["key"], sender_name=user["name"],
+                    reference_id=sid, play_sound=True)
+        else:
+            _notify(db, title="↩️ Sua sugestão foi avaliada",
+                    message=reason or f"{user['name']} marcou sua sugestão como pendente",
+                    ntype="system", target_user_key=row["author_key"],
+                    sender_key=user["key"], sender_name=user["name"],
+                    reference_id=sid, play_sound=True)
+    db.commit()
+    ws_emit("sugestoes_updated", {"type": "status", "id": sid})
+    return {"ok": True}
+
 # ── RANKING ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/ranking")
@@ -2919,12 +3491,32 @@ MOOD_EMOJIS = {1: "\U0001F61E", 2: "\U0001F641", 3: "\U0001F610", 4: "\U0001F642
 
 _mood_rate = {}
 
+_BRT = datetime.timezone(datetime.timedelta(hours=-3))
+
+def _mood_today_record(db, user_key):
+    """Retorna o registro de humor do usuário caso já tenha avaliado hoje (fuso BRT)."""
+    try:
+        row = db.execute(
+            "SELECT mood, created_at FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 1",
+            (user_key,)
+        ).fetchone()
+        if not row or not row["created_at"]:
+            return None
+        dt = datetime.datetime.fromisoformat(str(row["created_at"]))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        if dt.astimezone(_BRT).date() == datetime.datetime.now(_BRT).date():
+            return row
+    except (ValueError, TypeError):
+        return None
+    return None
+
 def _check_mood_rate_limit(user_key: str):
     hoje = datetime.date.today().isoformat()
     key = f"mood:{user_key}:{hoje}"
     count = _mood_rate.get(key, 0)
-    if count >= 5:
-        raise HTTPException(status_code=429, detail="Limite diário de 5 registros de humor atingido.")
+    if count >= 1:
+        raise HTTPException(status_code=429, detail="Você já registrou seu humor hoje. Volte amanhã!")
     _mood_rate[key] = count + 1
 
 @app.post("/api/mood")
@@ -2937,6 +3529,9 @@ def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user
         mood_key = body.mood
     else:
         raise HTTPException(status_code=422, detail="Informe valor_humor (1-5) ou mood.")
+
+    if _mood_today_record(db, user["key"]):
+        raise HTTPException(status_code=429, detail="Você já registrou seu humor hoje. Volte amanhã!")
 
     _check_mood_rate_limit(user["key"])
 
@@ -2971,6 +3566,14 @@ def get_mood_history(user=Depends(get_current_user), db=Depends(get_db)):
     rows = db.execute("SELECT * FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 100",
                     (user["key"],)).fetchall()
     return [dict(r) for r in rows]
+
+@app.get("/api/mood/status")
+def get_mood_status(user=Depends(get_current_user), db=Depends(get_db)):
+    rec = _mood_today_record(db, user["key"])
+    valor = None
+    if rec:
+        valor = {v: k for k, v in MOOD_VALUES.items()}.get(rec["mood"])
+    return {"registered_today": bool(rec), "valor_humor": valor}
 
 @app.post("/api/mood/reset")
 def reset_mood(user=Depends(get_current_user), db=Depends(get_db)):
@@ -4114,6 +4717,14 @@ def get_metric_celebracoes(user=Depends(get_current_user), db=Depends(get_db)):
     ).fetchone()
     return {"count": row["cnt"] if row else 0}
 
+@app.get("/api/metricas/reconhecimentos")
+def get_metric_reconhecimentos(user=Depends(get_current_user), db=Depends(get_db)):
+    row = db.execute(
+        "SELECT COUNT(*) as cnt FROM atividades_dialogos WHERE tipo='parabens' AND autor_key=%s",
+        (user["key"],)
+    ).fetchone()
+    return {"count": row["cnt"] if row else 0}
+
 @app.get("/api/metricas/feedbacks")
 def get_metric_feedbacks(user=Depends(get_current_user), db=Depends(get_db)):
     _ensure_feedback_tables(db)
@@ -4126,7 +4737,7 @@ def get_metric_feedbacks(user=Depends(get_current_user), db=Depends(get_db)):
 @app.get("/api/metricas/pesquisas")
 def get_metric_pesquisas(user=Depends(get_current_user), db=Depends(get_db)):
     row = db.execute(
-        "SELECT COUNT(*) as cnt FROM pesquisas WHERE user_key=%s",
+        "SELECT COUNT(*) as cnt FROM pesquisa_respostas WHERE user_key=%s",
         (user["key"],)
     ).fetchone()
     return {"count": row["cnt"] if row else 0}
@@ -4137,6 +4748,215 @@ def get_metric_colaboradores(user=Depends(get_current_user), db=Depends(get_db))
         "SELECT COUNT(*) as cnt FROM users WHERE desligado=0"
     ).fetchone()
     return {"count": row["cnt"] if row else 0}
+
+
+# ── PAINEL DO CEO ───────────────────────────────────────────────────────────────
+
+def _is_ceo_or_dev(user) -> bool:
+    """Acesso exclusivo: CEO ou o desenvolvedor responsável."""
+    if not user:
+        return False
+    if user.get("key") == SUGESTOES_DEV_KEY:
+        return True
+    return (user.get("role") or "").strip().lower() == "ceo"
+
+
+@app.get("/api/ceo/painel")
+def ceo_painel(user=Depends(get_current_user), db=Depends(get_db)):
+    """Agrega visão geral, vagas em análise, clima da equipe e destaques do mês."""
+    if not _is_ceo_or_dev(user):
+        raise HTTPException(status_code=403, detail="Painel exclusivo do CEO.")
+
+    hoje = datetime.date.today()
+    inicio_mes = hoje.replace(day=1).isoformat()
+    inicio_30d = (hoje - datetime.timedelta(days=30)).isoformat()
+
+    # 1. Contadores rápidos
+    colaboradores = db.execute(
+        "SELECT COUNT(*) as cnt FROM users WHERE COALESCE(desligado,0)=0"
+    ).fetchone()["cnt"]
+
+    sugestoes_pendentes = db.execute(
+        "SELECT COUNT(*) as cnt FROM melhoria_sugestoes WHERE COALESCE(is_done,0)=0"
+    ).fetchone()["cnt"]
+
+    feedbacks_mes = db.execute(
+        "SELECT COUNT(*) as cnt FROM feedbacks WHERE created_at >= %s",
+        (inicio_mes,)
+    ).fetchone()["cnt"]
+
+    vagas_analise = db.execute(
+        "SELECT COUNT(*) as cnt FROM vagas WHERE status='em_analise'"
+    ).fetchone()["cnt"]
+
+    # 2. Vagas aguardando análise
+    vagas_rows = db.execute("""
+        SELECT v.*,
+               (SELECT COUNT(*) FROM vaga_candidaturas c WHERE c.vaga_id = v.id) AS total_candidaturas
+        FROM vagas v WHERE v.status='em_analise' ORDER BY v.created_at ASC
+    """).fetchall()
+
+    # 3. Clima/humor da equipe (últimos 30 dias)
+    humor_rows = db.execute(
+        "SELECT user_key, mood, created_at FROM mood_history WHERE created_at >= %s ORDER BY created_at ASC",
+        (inicio_30d + "T00:00:00",)
+    ).fetchall()
+
+    por_dia = {}
+    distribuicao = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    participantes = set()
+    total_registros = 0
+    soma_valores = 0
+
+    for r in humor_rows:
+        valor = None
+        for v, k in MOOD_VALUES.items():
+            if r["mood"] == k:
+                valor = v
+                break
+        if valor is None:
+            continue
+        participantes.add(r["user_key"])
+        distribuicao[valor] += 1
+        soma_valores += valor
+        total_registros += 1
+        por_dia.setdefault(r["created_at"][:10], []).append(valor)
+
+    humor_serie = [
+        {
+            "data": dia,
+            "media": round(sum(vals) / len(vals), 2),
+            "total": len(vals),
+        }
+        for dia, vals in sorted(por_dia.items())
+    ]
+
+    media_geral = round(soma_valores / total_registros, 2) if total_registros else 0
+
+    # 4. Destaques do mês (top 5)
+    mes_ranking = f"{hoje.year}-{str(hoje.month).zfill(2)}"
+    rank_rows = db.execute("""
+        SELECT mr.user_key, mr.points, mr.position, u.name, u.initials, u.color, u.photo_url
+        FROM monthly_ranking mr JOIN users u ON u.key = mr.user_key
+        WHERE mr.month=%s ORDER BY mr.position ASC LIMIT 5
+    """, (mes_ranking,)).fetchall()
+
+    ranking = []
+    if rank_rows:
+        for r in rank_rows:
+            d = dict(r)
+            ranking.append({
+                "position": d["position"], "user_key": d["user_key"],
+                "name": d["name"], "initials": d["initials"],
+                "color": d["color"], "points": d["points"],
+                "photo_url": d.get("photo_url") or "",
+            })
+    else:
+        fallback_rows = db.execute(
+            "SELECT key, points, name, initials, color, photo_url FROM users "
+            "WHERE points > 0 AND COALESCE(desligado,0)=0 ORDER BY points DESC LIMIT 5"
+        ).fetchall()
+        for idx, r in enumerate(fallback_rows, 1):
+            d = dict(r)
+            ranking.append({
+                "position": idx, "user_key": d["key"], "name": d["name"],
+                "initials": d["initials"], "color": d["color"], "points": d["points"],
+                "photo_url": d.get("photo_url") or "",
+            })
+
+    return {
+        "stats": {
+            "colaboradores": colaboradores or 0,
+            "sugestoes_pendentes": sugestoes_pendentes or 0,
+            "feedbacks_mes": feedbacks_mes or 0,
+            "vagas_analise": vagas_analise or 0,
+        },
+        "vagas_pendentes": [_vaga_dict(r) for r in vagas_rows],
+        "humor": {
+            "media_geral": media_geral,
+            "total_registros": total_registros,
+            "participantes": len(participantes),
+            "distribuicao": {str(k): v for k, v in distribuicao.items()},
+            "serie": humor_serie,
+        },
+        "ranking": ranking,
+        "mes_ranking": mes_ranking,
+    }
+
+
+# ── PESQUISAS ───────────────────────────────────────────────────────────────────
+
+def _can_manage_pesquisas(user) -> bool:
+    """CEO, RH, Líder, Diretor, Admin ou gestão podem gerir pesquisas."""
+    if not user:
+        return False
+    if user.get("is_admin") or user.get("is_admin_user") or user.get("is_rh") or user.get("is_diretor") or user.get("is_leader"):
+        return True
+    if int(user.get("access_level", 0) or 0) >= 2:
+        return True
+    role = (user.get("role") or "").strip().lower()
+    if role == "ceo":
+        return True
+    pos = (user.get("org_position") or "").strip().lower()
+    if pos in ("gestor", "supervisor", "lider"):
+        return True
+    return False
+
+@app.get("/api/pesquisas")
+def list_pesquisas(user=Depends(get_current_user), db=Depends(get_db)):
+    """Listar pesquisas (para gestão). Exige permissão."""
+    if not _can_manage_pesquisas(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para gerir pesquisas.")
+    rows = db.execute("""
+        SELECT p.*,
+               (SELECT COUNT(*) FROM pesquisa_respostas r WHERE r.pesquisa_id = p.id) as total_respostas
+        FROM pesquisas p
+        ORDER BY p.created_at DESC
+    """).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        result.append(d)
+    return result
+
+@app.post("/api/pesquisas")
+def criar_pesquisa(body: PesquisaRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_manage_pesquisas(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para publicar pesquisas.")
+    pid = str(uuid.uuid4())
+    now = datetime.datetime.utcnow().isoformat()
+    if not body.titulo.strip() or not body.pergunta.strip():
+        raise HTTPException(status_code=400, detail="Título e pergunta são obrigatórios.")
+    db.execute("""
+        INSERT INTO pesquisas (id, titulo, pergunta, escala_max, criado_por, criado_por_nome, is_active, created_at, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)
+    """, (pid, body.titulo.strip(), body.pergunta.strip(), body.escala_max or 10,
+          user["key"], user.get("name", ""), now, body.expires_at))
+    db.commit()
+    log_action(db, user["key"], user["key"], "Publicação de Pesquisa", f"Publicou pesquisa: {body.titulo}")
+    return {"id": pid, "message": "Pesquisa publicada."}
+
+@app.get("/api/pesquisas/ativas")
+def pesquisas_ativas(user=Depends(get_current_user), db=Depends(get_db)):
+    """Pesquisas ativas + se o usuário já respondeu (para o modal)."""
+    rows = db.execute("""
+        SELECT p.*,
+               (SELECT COUNT(*) FROM pesquisa_respostas r WHERE r.pesquisa_id = p.id) AS total_respostas
+        FROM pesquisas p
+        WHERE p.is_active = 1
+        ORDER BY p.created_at DESC
+    """).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        resp = db.execute(
+            "SELECT * FROM pesquisa_respostas WHERE pesquisa_id=%s AND user_key=%s",
+            (d["id"], user["key"])
+        ).fetchone()
+        d["ja_respondida"] = resp is not None
+        d["minha_resposta"] = dict(resp) if resp else None
+        result.append(d)
+    return result
 
 
 # ── TAREFAS ───────────────────────────────────────────────────────────────────
@@ -6032,6 +6852,429 @@ def gestao_dashboard_usuario(target_key: str, user=Depends(get_current_user), db
         "humor": humor_translated,
         "atividades": [dict(a) for a in atividades],
     }
+
+
+# ── CONTRATAÇÃO ───────────────────────────────────────────────────────────────
+
+ALLOWED_DOC_EXTENSIONS = {".pdf", ".doc", ".docx"}
+ALLOWED_DOC_MIMES = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+MAX_DOC_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+def _validate_doc_file(file: UploadFile):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Arquivo sem nome")
+    ext = Path(file.filename).suffix.lower()
+    mime = file.content_type or ""
+    if ext not in ALLOWED_DOC_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Envie o currículo em PDF, DOC ou DOCX.")
+    if mime and mime not in ALLOWED_DOC_MIMES:
+        raise HTTPException(status_code=400, detail="Tipo de arquivo inválido.")
+    if file.size and file.size > MAX_DOC_SIZE:
+        raise HTTPException(status_code=400, detail="Currículo muito grande (máx 10MB).")
+    return ext
+
+
+def _ceo_keys(db) -> list[str]:
+    rows = db.execute("""
+        SELECT key FROM users
+        WHERE COALESCE(desligado, 0) = 0 AND LOWER(TRIM(role)) = 'ceo'
+    """).fetchall()
+    return [r["key"] for r in rows]
+
+
+def _vaga_dict(row) -> dict:
+    d = dict(row)
+    d["total_candidaturas"] = None
+    return d
+
+
+def _vaga_aberta(vaga: dict) -> bool:
+    if vaga.get("status") != "aprovada":
+        return False
+    dl = vaga.get("deadline") or ""
+    return (not dl) or (datetime.date.today().isoformat() <= dl)
+
+
+@app.get("/api/vagas")
+def listar_vagas(user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    rows = db.execute("""
+        SELECT v.*,
+               (SELECT COUNT(*) FROM vaga_candidaturas c WHERE c.vaga_id = v.id) AS total_candidaturas
+        FROM vagas v ORDER BY v.created_at DESC
+    """).fetchall()
+    return [_vaga_dict(r) for r in rows]
+
+
+@app.post("/api/vagas")
+def criar_vaga(body: VagaCreateRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    import uuid as _uuid
+    now = datetime.datetime.utcnow().isoformat()
+    vaga_id = str(_uuid.uuid4())
+    db.execute("""INSERT INTO vagas
+        (id, titulo, senioridade, descricao, salario, requisitos, expectativas,
+         formacao, palavras_chave, status, motivo_rejeicao, created_by, created_by_name,
+         apply_token, deadline, created_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'em_analise','',%s,%s,'',%s,%s,%s)""",
+        (vaga_id, body.titulo.strip(), body.senioridade, body.descricao, body.salario,
+         body.requisitos, body.expectativas, body.formacao, body.palavras_chave,
+         user["key"], user.get("name", ""), body.deadline or "", now, now))
+    for ceo_key in _ceo_keys(db):
+        _notify(db, title="Nova vaga para análise",
+                message=f'{user.get("name", "RH")} abriu a vaga "{body.titulo}". Aguardando sua aprovação.',
+                ntype="vaga", target_user_key=ceo_key, reference_id=vaga_id)
+    return {"id": vaga_id, "message": "Vaga enviada para análise do CEO."}
+
+
+@app.post("/api/vagas/{vaga_id}/review")
+def revisar_vaga(vaga_id: str, body: VagaReviewRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    me = db.execute("SELECT role FROM users WHERE key=%s", (user["key"],)).fetchone()
+    is_ceo = bool(me and (me["role"] or "").strip().lower() == "ceo")
+    if user.get("access_level", 0) < 2 and not is_ceo:
+        raise HTTPException(status_code=403, detail="Somente o CEO pode analisar vagas.")
+    vaga = db.execute("SELECT * FROM vagas WHERE id=%s", (vaga_id,)).fetchone()
+    if not vaga:
+        raise HTTPException(status_code=404, detail="Vaga não encontrada.")
+    if vaga["status"] != "em_analise":
+        raise HTTPException(status_code=400, detail="Esta vaga já foi analisada.")
+
+    import secrets as _secrets
+    if body.aprovada:
+        token = _secrets.token_urlsafe(24)
+        db.execute("""UPDATE vagas SET status='aprovada', apply_token=%s, deadline=%s, updated_at=%s WHERE id=%s""",
+                   (token, body.deadline or "", datetime.datetime.utcnow().isoformat(), vaga_id))
+        _notify(db, title="Vaga aprovada",
+                message=f'Sua vaga "{vaga["titulo"]}" foi aprovada pelo CEO. O formulário de candidatura já está disponível.',
+                ntype="vaga", target_user_key=vaga["created_by"], reference_id=vaga_id)
+        rh_rows = db.execute("SELECT key FROM users WHERE is_rh=1 AND COALESCE(desligado,0)=0").fetchall()
+        for r in rh_rows:
+            if r["key"] != vaga["created_by"]:
+                _notify(db, title="Vaga aprovada",
+                        message=f'A vaga "{vaga["titulo"]}" foi aprovada. Divulgue o formulário com os candidatos.',
+                        ntype="vaga", target_user_key=r["key"], reference_id=vaga_id)
+        return {"message": "Vaga aprovada.", "apply_token": token}
+    else:
+        if not (body.motivo or "").strip():
+            raise HTTPException(status_code=400, detail="Descreva os motivos da reprovação.")
+        db.execute("""UPDATE vagas SET status='reprovada', motivo_rejeicao=%s, updated_at=%s WHERE id=%s""",
+                   (body.motivo.strip(), datetime.datetime.utcnow().isoformat(), vaga_id))
+        _notify(db, title="Vaga reprovada",
+                message=f'Sua vaga "{vaga["titulo"]}" foi reprovada. Motivos: {body.motivo.strip()}',
+                ntype="vaga", target_user_key=vaga["created_by"], reference_id=vaga_id)
+        return {"message": "Vaga reprovada."}
+
+
+@app.put("/api/vagas/{vaga_id}")
+def atualizar_vaga(vaga_id: str, body: VagaUpdateRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    vaga = db.execute("SELECT * FROM vagas WHERE id=%s", (vaga_id,)).fetchone()
+    if not vaga:
+        raise HTTPException(status_code=404, detail="Vaga não encontrada.")
+    eh_dono = vaga["created_by"] == user["key"]
+    if not (_can_gestao(user) and (eh_dono or user.get("access_level", 0) >= 2)):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    allowed = {"titulo", "senioridade", "descricao", "salario", "requisitos",
+               "expectativas", "formacao", "palavras_chave", "deadline"}
+    updates, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            updates.append(f"{k}=%s"); params.append(v)
+        elif k == "status" and v in ("encerrada", "aprovada") and vaga["status"] == "aprovada":
+            updates.append("status=%s"); params.append(v)
+    if not updates:
+        return {"message": "Nada a atualizar."}
+    updates.append("updated_at=%s"); params.append(datetime.datetime.utcnow().isoformat())
+    params.append(vaga_id)
+    db.execute(f"UPDATE vagas SET {', '.join(updates)} WHERE id=%s", tuple(params))
+    return {"message": "Vaga atualizada."}
+
+
+@app.delete("/api/vagas/{vaga_id}")
+def excluir_vaga(vaga_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    if user.get("access_level", 0) < 2:
+        raise HTTPException(status_code=403, detail="Somente administradores.")
+    db.execute("DELETE FROM vaga_candidaturas WHERE vaga_id=%s", (vaga_id,))
+    db.execute("DELETE FROM vagas WHERE id=%s", (vaga_id,))
+    return {"message": "Vaga excluída."}
+
+
+@app.get("/api/vagas/{vaga_id}/candidaturas")
+def listar_candidaturas(vaga_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    rows = db.execute(
+        "SELECT * FROM vaga_candidaturas WHERE vaga_id=%s ORDER BY score DESC NULLS LAST, created_at DESC",
+        (vaga_id,)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["respostas"] = json.loads(d.get("respostas") or "{}")
+            d["disc"] = json.loads(d.get("disc") or "{}")
+            d["score_breakdown"] = json.loads(d.get("score_breakdown") or "{}")
+        except Exception:
+            d["respostas"], d["disc"], d["score_breakdown"] = {}, {}, {}
+        result.append(d)
+    return result
+
+
+@app.post("/api/candidaturas/{cand_id}/status")
+def status_candidatura(cand_id: str, body: CandidaturaStatusRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    if body.status not in ("recebido", "aprovado", "reprovado", "contratado"):
+        raise HTTPException(status_code=400, detail="Status inválido.")
+    row = db.execute("SELECT id FROM vaga_candidaturas WHERE id=%s", (cand_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidatura não encontrada.")
+    db.execute("UPDATE vaga_candidaturas SET status=%s WHERE id=%s", (body.status, cand_id))
+    return {"message": "Candidato atualizado."}
+
+
+@app.post("/api/vagas/{vaga_id}/avaliar")
+def avaliar_candidaturas(vaga_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    """Executa a análise IA dos currículos da vaga e grava o % de aderência."""
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    from resume_scoring import extract_resume_text, score_candidato
+    import urllib.request as _urlreq
+
+    vaga = db.execute("SELECT * FROM vagas WHERE id=%s", (vaga_id,)).fetchone()
+    if not vaga:
+        raise HTTPException(status_code=404, detail="Vaga não encontrada.")
+    vaga_d = dict(vaga)
+    cands = db.execute(
+        "SELECT * FROM vaga_candidaturas WHERE vaga_id=%s", (vaga_id,)).fetchall()
+
+    avaliados = 0
+    for c in cands:
+        c_d = dict(c)
+        texto = ""
+        url = c_d.get("curriculo_url") or ""
+        if url:
+            try:
+                full = url if url.startswith("http") else f"https://res.cloudinary/{url}"
+                with _urlreq.urlopen(full, timeout=20) as resp:
+                    texto = extract_resume_text(resp.read(), c_d.get("curriculo_nome") or "")
+            except Exception:
+                texto = ""
+        respostas_str = json.dumps(c_d.get("respostas"), ensure_ascii=False) if c_d.get("respostas") else ""
+        resultado = score_candidato(vaga_d, texto, respostas_str)
+        db.execute("""UPDATE vaga_candidaturas
+                      SET score=%s, score_breakdown=%s, status=CASE WHEN status='recebido' THEN 'avaliado' ELSE status END
+                      WHERE id=%s""",
+                   (resultado["score"], json.dumps(resultado["breakdown"], ensure_ascii=False), c_d["id"]))
+        avaliados += 1
+
+    return {"message": f"Análise concluída: {avaliados} candidato(s) avaliado(s).", "avaliados": avaliados}
+
+
+# ── Período de experiência ────────────────────────────────────────────────────
+
+EXPERIENCIA_DIAS = 90
+
+
+@app.get("/api/experiencia")
+def listar_experiencia(user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    hoje = datetime.date.today()
+    rows = db.execute("""
+        SELECT key, name, initials, color, photo_url, role, dept, hire_date
+        FROM users
+        WHERE COALESCE(desligado, 0) = 0 AND hire_date IS NOT NULL AND hire_date <> ''
+    """).fetchall()
+
+    registros = {}
+    for r in db.execute("SELECT * FROM experiencia_registros").fetchall():
+        registros[r["user_key"]] = dict(r)
+
+    result = []
+    for u in rows:
+        u_d = dict(u)
+        try:
+            inicio = datetime.date.fromisoformat((u_d.get("hire_date") or "")[:10])
+        except Exception:
+            continue
+        fim = inicio + datetime.timedelta(days=EXPERIENCIA_DIAS)
+        dias_restantes = (fim - hoje).days
+        reg = registros.get(u_d["key"])
+        # Exibe quem está no período ou saiu dele há menos de 45 dias sem registro
+        if dias_restantes < -45 and (not reg or reg.get("resultado")):
+            continue
+        result.append({
+            **{k: u_d.get(k, "") for k in ("key", "name", "initials", "color", "photo_url", "role", "dept")},
+            "hire_date": u_d.get("hire_date", ""),
+            "inicio": inicio.isoformat(),
+            "fim_previsto": fim.isoformat(),
+            "dias_restantes": dias_restantes,
+            "registro": reg,
+        })
+    result.sort(key=lambda x: x["dias_restantes"])
+    return result
+
+
+@app.post("/api/experiencia/{user_key}")
+def registrar_experiencia(user_key: str, body: ExperienciaRegistroRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    if not _can_gestao(user):
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    if body.resultado and body.resultado not in ("efetivado", "prorrogado", "desligado"):
+        raise HTTPException(status_code=400, detail="Resultado inválido.")
+    target = db.execute("SELECT hire_date, name FROM users WHERE key=%s", (user_key,)).fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    agora = datetime.datetime.utcnow().isoformat()
+    inicio = (target["hire_date"] or "")[:10]
+    fim = ""
+    if inicio:
+        try:
+            fim = (datetime.date.fromisoformat(inicio) + datetime.timedelta(days=EXPERIENCIA_DIAS)).isoformat()
+        except Exception:
+            pass
+    db.execute("""
+        INSERT INTO experiencia_registros (user_key, start_date, end_date, resultado, notas, updated_by, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (user_key) DO UPDATE SET
+            resultado=EXCLUDED.resultado, notas=EXCLUDED.notas,
+            updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at
+    """, (user_key, inicio, fim, body.resultado, body.notas, user.get("name", ""), agora))
+    return {"message": "Registro salvo."}
+
+
+# ── CONTRATAÇÃO · Área pública do candidato ──────────────────────────────────
+
+@app.get("/api/public/vagas/{token}")
+def public_vaga(token: str, request: Request, db=Depends(get_db)):
+    row = db.execute("SELECT * FROM vagas WHERE apply_token=%s", (token,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Inscrição indisponível.")
+    vaga = dict(row)
+    if not _vaga_aberta(vaga):
+        raise HTTPException(status_code=400, detail="O período de inscrições para esta vaga está encerrado.")
+    ip = request.client.host if request.client else "?"
+    _check_upload_rate_limit(f"pubview:{ip}")
+    return {
+        "titulo": vaga["titulo"],
+        "senioridade": vaga["senioridade"],
+        "descricao": vaga["descricao"],
+        "salario": vaga["salario"],
+        "requisitos": vaga["requisitos"],
+        "expectativas": vaga["expectativas"],
+        "formacao": vaga["formacao"],
+        "deadline": vaga["deadline"],
+    }
+
+
+@app.post("/api/public/vagas/{token}/candidatura")
+async def public_candidatar(
+    token: str,
+    request: Request,
+    nome: str = Form(...),
+    email: str = Form(...),
+    telefone: str = Form(""),
+    respostas: str = Form("{}"),
+    disc_most: str = Form(""),
+    disc_least: str = Form(""),
+    curriculo: UploadFile = File(None),
+    db=Depends(get_db),
+):
+    row = db.execute("SELECT * FROM vagas WHERE apply_token=%s", (token,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Inscrição indisponível.")
+    vaga = dict(row)
+    if not _vaga_aberta(vaga):
+        raise HTTPException(status_code=400, detail="O período de inscrições está encerrado.")
+
+    ip = request.client.host if request.client else "?"
+    _check_upload_rate_limit(f"public:{ip}")
+
+    nome = nome.strip()
+    email_norm = email.strip().lower()
+    if len(nome) < 3:
+        raise HTTPException(status_code=400, detail="Informe seu nome completo.")
+    if "@" not in email_norm or "." not in email_norm:
+        raise HTTPException(status_code=400, detail="Informe um e-mail válido.")
+
+    dup = db.execute(
+        "SELECT id FROM vaga_candidaturas WHERE vaga_id=%s AND email=%s",
+        (vaga["id"], email_norm)).fetchone()
+    if dup:
+        raise HTTPException(status_code=409, detail="Este e-mail já se inscreveu nesta vaga.")
+
+    # DISC
+    def _parse_idx(s):
+        out = []
+        for p in (s or "").split(","):
+            p = p.strip()
+            if p.isdigit() and 0 <= int(p) <= 3:
+                out.append(int(p))
+        return out
+    from resume_scoring import compute_disc
+    disc_result = compute_disc(_parse_idx(disc_most), _parse_idx(disc_least))
+
+    try:
+        respostas_obj = json.loads(respostas or "{}")
+    except Exception:
+        respostas_obj = {}
+
+    curriculo_url, curriculo_nome = "", ""
+    if curriculo and curriculo.filename:
+        ext = _validate_doc_file(curriculo)
+        data = await curriculo.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="Arquivo de currículo vazio.")
+        result = cloudinary.uploader.upload(
+            io.BytesIO(data),
+            resource_type="raw",
+            folder="dialogos/curriculos",
+            public_id=f"{vaga['id']}_{email_norm.replace('@','_')}_{int(datetime.datetime.utcnow().timestamp())}{ext}",
+        )
+        curriculo_url = result.get("secure_url", "")
+        curriculo_nome = curriculo.filename
+
+    import uuid as _uuid
+    cand_id = str(_uuid.uuid4())
+    db.execute("""INSERT INTO vaga_candidaturas
+        (id, vaga_id, nome, email, telefone, respostas, disc,
+         curriculo_url, curriculo_nome, score, score_breakdown, status, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,'{}','recebido',%s)""",
+        (cand_id, vaga["id"], nome, email_norm, telefone.strip(),
+         json.dumps(respostas_obj, ensure_ascii=False),
+         json.dumps(disc_result, ensure_ascii=False),
+         curriculo_url, curriculo_nome,
+         datetime.datetime.utcnow().isoformat()))
+
+    _notify(db, title="Nova candidatura recebida",
+            message=f'"{nome}" se inscreveu na vaga "{vaga["titulo"]}".',
+            ntype="vaga", target_user_key=vaga["created_by"], reference_id=vaga["id"])
+
+    return {"message": "Candidatura enviada com sucesso! Boa sorte.", "perfil_disc": disc_result.get("perfil", "")}
+
+
+CANDIDATURA_HTML = Path(__file__).parent / "static" / "candidatura.html"
+
+
+@app.get("/candidatura/{token}", include_in_schema=False)
+def pagina_candidatura(token: str):
+    if not CANDIDATURA_HTML.exists():
+        raise HTTPException(status_code=500, detail="Página não encontrada.")
+    return FileResponse(CANDIDATURA_HTML, media_type="text/html")
+
+
+@app.get("/clinica-dialogos.png", include_in_schema=False)
+def logo_publico():
+    p = Path(__file__).parent / "static" / "clinica-dialogos.png"
+    if not p.exists():
+        raise HTTPException(status_code=404)
+    return FileResponse(p, media_type="image/png")
 
 
 # Expose a unified ASGI app (FastAPI + Socket.IO)

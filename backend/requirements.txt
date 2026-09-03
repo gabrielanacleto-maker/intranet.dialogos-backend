@@ -43,3 +43,4 @@ watchfiles==1.1.1
 websockets==16.0
 fpdf2==2.8.7
 python-socketio==5.11.4
+pypdf==5.1.0
