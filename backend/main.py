@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
-import os, io, uuid, shutil, datetime, json, re, time, asyncio
+import os, io, uuid, shutil, datetime, json, re, time, asyncio, threading
 from urllib.parse import urlparse, parse_qs, quote
 from pathlib import Path
 import logging
@@ -2050,22 +2050,27 @@ def get_unviewed_counts(feed: str = "feed", user=Depends(get_current_user), db=D
         allowed, _ = can_access_social_room(db, social_room_id, user)
         if not allowed:
             raise HTTPException(status_code=403, detail="Sem acesso.")
-    rows = db.execute(
-        "SELECT p.id FROM posts p WHERE p.feed=%s ORDER BY p.created_at DESC",
-        (feed,)
-    ).fetchall()
-    total = len(rows)
-    viewed_rows = db.execute(
-        "SELECT pv.post_id FROM post_views pv WHERE pv.user_key=%s AND pv.post_id IN (SELECT id FROM posts WHERE feed=%s)",
-        (user["key"], feed)
-    ).fetchall()
-    viewed_ids = {r["post_id"] for r in viewed_rows}
-    unviewed_count = total - len(viewed_ids)
-    unviewed_ids = [r["id"] for r in rows if r["id"] not in viewed_ids]
+    agg = db.execute("""
+        SELECT COUNT(*) AS total, COUNT(pv.post_id) AS viewed_count
+        FROM posts p
+        LEFT JOIN post_views pv ON pv.post_id = p.id AND pv.user_key = %s
+        WHERE p.feed = %s
+    """, (user["key"], feed)).fetchone()
+    total = agg["total"] if agg else 0
+    viewed_count = agg["viewed_count"] if agg else 0
+    unviewed_count = total - viewed_count
+    rows = db.execute("""
+        SELECT p.id FROM posts p
+        LEFT JOIN post_views pv ON pv.post_id = p.id AND pv.user_key = %s
+        WHERE p.feed = %s AND pv.post_id IS NULL
+        ORDER BY p.created_at DESC
+        LIMIT 50
+    """, (user["key"], feed)).fetchall()
+    unviewed_ids = [r["id"] for r in rows]
     return {
         "total": total,
         "unviewed_count": unviewed_count,
-        "unviewed_ids": unviewed_ids[:50],
+        "unviewed_ids": unviewed_ids,
     }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2074,52 +2079,63 @@ def get_unviewed_counts(feed: str = "feed", user=Depends(get_current_user), db=D
 
 _COMUNICADO_RATE_LIMITS = {}  # user_key -> list of publish timestamps for rate limiting
 
+_comunicados_tables_ready = False
+_comunicados_tables_lock = threading.Lock()
+
 def _ensure_comunicados_table(db):
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS communications (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            author_key TEXT NOT NULL,
-            author_name TEXT NOT NULL,
-            is_draft INTEGER NOT NULL DEFAULT 1,
-            is_published INTEGER NOT NULL DEFAULT 0,
-            published_at TEXT,
-            is_deleted INTEGER NOT NULL DEFAULT 0,
-            deleted_at TEXT,
-            deleted_by_key TEXT,
-            target_audience TEXT NOT NULL DEFAULT 'all',
-            priority TEXT NOT NULL DEFAULT 'normal',
-            views_count INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS communication_reads (
-            id TEXT PRIMARY KEY,
-            communication_id TEXT NOT NULL,
-            user_key TEXT NOT NULL,
-            read_at TEXT NOT NULL,
-            read_count INTEGER NOT NULL DEFAULT 1,
-            UNIQUE(communication_id, user_key)
-        )
-    """)
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS communication_notifications (
-            id TEXT PRIMARY KEY,
-            communication_id TEXT NOT NULL,
-            notified_at TEXT NOT NULL,
-            total_recipients INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_author ON communications(author_key)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_published ON communications(is_published)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_deleted ON communications(is_deleted)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_audience ON communications(target_audience)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_created ON communications(created_at DESC)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_comm ON communication_reads(communication_id)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user ON communication_reads(user_key)")
+    """Create comunicados tables + indexes once per process. No-op afterwards."""
+    global _comunicados_tables_ready
+    if _comunicados_tables_ready:
+        return
+    with _comunicados_tables_lock:
+        if _comunicados_tables_ready:
+            return
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS communications (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                author_key TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                is_draft INTEGER NOT NULL DEFAULT 1,
+                is_published INTEGER NOT NULL DEFAULT 0,
+                published_at TEXT,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT,
+                deleted_by_key TEXT,
+                target_audience TEXT NOT NULL DEFAULT 'all',
+                priority TEXT NOT NULL DEFAULT 'normal',
+                views_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS communication_reads (
+                id TEXT PRIMARY KEY,
+                communication_id TEXT NOT NULL,
+                user_key TEXT NOT NULL,
+                read_at TEXT NOT NULL,
+                read_count INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(communication_id, user_key)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS communication_notifications (
+                id TEXT PRIMARY KEY,
+                communication_id TEXT NOT NULL,
+                notified_at TEXT NOT NULL,
+                total_recipients INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_comm_author ON communications(author_key)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_comm_published ON communications(is_published)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_comm_deleted ON communications(is_deleted)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_comm_audience ON communications(target_audience)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_comm_created ON communications(created_at DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_comm ON communication_reads(communication_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_comm_reads_user ON communication_reads(user_key)")
+        _comunicados_tables_ready = True
 
 
 def _can_publish_comunicado(user) -> bool:
@@ -4558,32 +4574,42 @@ def get_gamification_dashboard(user_key: str, user=Depends(get_current_user), db
 # FEEDBACK SYSTEM
 # ─────────────────────────────────────────────────────────────────────────────
 
+_feedback_tables_ready = False
+_feedback_tables_lock = threading.Lock()
+
 def _ensure_feedback_tables(db):
-    """Create feedback tables if not exist (idempotent)."""
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS feedbacks (
-            id TEXT PRIMARY KEY,
-            target_user_key TEXT NOT NULL,
-            evaluator_key TEXT NOT NULL,
-            evaluator_name TEXT NOT NULL,
-            evaluator_sector TEXT NOT NULL,
-            feedback_text TEXT NOT NULL,
-            rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 10),
-            action TEXT NOT NULL CHECK (action IN ('add', 'remove')),
-            points INTEGER NOT NULL CHECK (points >= 0 AND points <= 100),
-            created_at TEXT NOT NULL
-        )
-    """)
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id TEXT PRIMARY KEY,
-            actor_id TEXT NOT NULL,
-            action TEXT NOT NULL,
-            target_user_id TEXT NOT NULL,
-            detail TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
+    """Create feedback tables once per process. No-op afterwards."""
+    global _feedback_tables_ready
+    if _feedback_tables_ready:
+        return
+    with _feedback_tables_lock:
+        if _feedback_tables_ready:
+            return
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS feedbacks (
+                id TEXT PRIMARY KEY,
+                target_user_key TEXT NOT NULL,
+                evaluator_key TEXT NOT NULL,
+                evaluator_name TEXT NOT NULL,
+                evaluator_sector TEXT NOT NULL,
+                feedback_text TEXT NOT NULL,
+                rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 10),
+                action TEXT NOT NULL CHECK (action IN ('add', 'remove')),
+                points INTEGER NOT NULL CHECK (points >= 0 AND points <= 100),
+                created_at TEXT NOT NULL
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id TEXT PRIMARY KEY,
+                actor_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_user_id TEXT NOT NULL,
+                detail TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        _feedback_tables_ready = True
 
 
 def _can_evaluate(user: dict) -> bool:
@@ -5699,28 +5725,38 @@ def get_current_month_birthdays(user=Depends(get_current_user), db=Depends(get_d
 # NOTIFICATION SYSTEM
 # ═════════════════════════════════════════════════════════════════════════════
 
+_notifications_tables_ready = False
+_notifications_tables_lock = threading.Lock()
+
 def _ensure_notifications_table(db):
-    """Idempotent — create notifications table + indexes if not exist."""
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS notifications (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            message TEXT NOT NULL,
-            type TEXT NOT NULL,
-            target_user_key TEXT NULL,
-            audience TEXT NULL DEFAULT 'personal',
-            sender_key TEXT NULL,
-            sender_name TEXT NULL,
-            reference_id TEXT NULL,
-            play_sound BOOLEAN DEFAULT FALSE,
-            is_read BOOLEAN DEFAULT FALSE,
-            created_at TEXT NOT NULL
-        )
-    """)
-    db.execute("CREATE INDEX IF NOT EXISTS idx_notif_target ON notifications(target_user_key)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_notif_audience ON notifications(audience)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_notif_created ON notifications(created_at DESC)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(is_read)")
+    """Create notifications table + indexes once per process. No-op afterwards."""
+    global _notifications_tables_ready
+    if _notifications_tables_ready:
+        return
+    with _notifications_tables_lock:
+        if _notifications_tables_ready:
+            return
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT NOT NULL,
+                target_user_key TEXT NULL,
+                audience TEXT NULL DEFAULT 'personal',
+                sender_key TEXT NULL,
+                sender_name TEXT NULL,
+                reference_id TEXT NULL,
+                play_sound BOOLEAN DEFAULT FALSE,
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at TEXT NOT NULL
+            )
+        """)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_notif_target ON notifications(target_user_key)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_notif_audience ON notifications(audience)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_notif_created ON notifications(created_at DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(is_read)")
+        _notifications_tables_ready = True
 
 
 def _notify(db, *, title: str, message: str, ntype: str,
