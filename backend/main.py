@@ -209,7 +209,11 @@ async def lifespan(app: FastAPI):
         global _sio_loop
         _sio_loop = asyncio.get_running_loop()
         init_db()
-        yield
+        try:
+            yield
+        finally:
+            from database import close_pool
+            close_pool()
 
 cloudinary.config(
         cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
@@ -297,6 +301,14 @@ def _cleanup_stale_presence():
     if stale:
         _emit_presence()
 
+def _fetch_user_for_socket(user_key: str):
+    with get_db_context() as db:
+        user_row = db.execute("SELECT * FROM users WHERE key=%s", (user_key,)).fetchone()
+        if not user_row:
+            return None
+        return dict(user_row)
+
+
 @sio.event
 async def connect(sid, environ, auth=None):
     token = _extract_socket_token(environ, auth)
@@ -305,11 +317,9 @@ async def connect(sid, environ, auth=None):
     payload = verify_token(token)
     if not payload or not payload.get("sub"):
         raise ConnectionRefusedError("unauthorized")
-    with get_db_context() as db:
-        user_row = db.execute("SELECT * FROM users WHERE key=%s", (payload["sub"],)).fetchone()
-        if not user_row:
-            raise ConnectionRefusedError("unauthorized")
-        user = dict(user_row)
+    user = await asyncio.to_thread(_fetch_user_for_socket, payload["sub"])
+    if user is None:
+        raise ConnectionRefusedError("unauthorized")
     await sio.save_session(sid, {
         "user_key": user["key"],
         "dept": user.get("dept", ""),
@@ -1649,7 +1659,7 @@ def get_posts(feed: str = "feed", limit: int = 20, offset: int = 0,
     return {"posts": result, "total": total}
 
 @app.post("/api/posts")
-async def create_post(body: CreatePostRequest, user=Depends(get_current_user), db=Depends(get_db)):
+def create_post(body: CreatePostRequest, user=Depends(get_current_user), db=Depends(get_db)):
     try:
         social_room_id = extract_room_id(body.feed)
         if social_room_id:
@@ -7174,7 +7184,7 @@ def public_vaga(token: str, request: Request, db=Depends(get_db)):
 
 
 @app.post("/api/public/vagas/{token}/candidatura")
-async def public_candidatar(
+def public_candidatar(
     token: str,
     request: Request,
     nome: str = Form(...),
@@ -7228,7 +7238,7 @@ async def public_candidatar(
     curriculo_url, curriculo_nome = "", ""
     if curriculo and curriculo.filename:
         ext = _validate_doc_file(curriculo)
-        data = await curriculo.read()
+        data = curriculo.file.read()
         if not data:
             raise HTTPException(status_code=400, detail="Arquivo de currículo vazio.")
         result = cloudinary.uploader.upload(

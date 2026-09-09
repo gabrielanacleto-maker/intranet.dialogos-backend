@@ -1,5 +1,6 @@
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 import os
 import uuid
 import datetime
@@ -39,20 +40,44 @@ class SmartCursor:
     def __getattr__(self, name):
         return getattr(self._cursor, name)
 
+
+_pool = None
+_DB_POOL_MIN = max(int(os.getenv("DB_POOL_MIN", "1")), 1)
+_DB_POOL_MAX = max(int(os.getenv("DB_POOL_MAX", "20")), _DB_POOL_MIN)
+
+
+def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            _DB_POOL_MIN, _DB_POOL_MAX, DB_URL
+        )
+    return _pool
+
+
+def close_pool():
+    global _pool
+    if _pool is not None:
+        _pool.closeall()
+        _pool = None
+
+
 @contextmanager
 def get_db_context():
-    conn = psycopg2.connect(DB_URL)
-    conn.autocommit = False
-    cursor = SmartCursor(conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor), conn)
+    conn = _get_pool().getconn()
     try:
-        yield cursor
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+        conn.autocommit = False
+        cursor = SmartCursor(conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor), conn)
+        try:
+            yield cursor
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor._cursor.close()
     finally:
-        cursor._cursor.close()
-        conn.close()
+        _get_pool().putconn(conn)
 
 def get_db():
     with get_db_context() as cursor:
