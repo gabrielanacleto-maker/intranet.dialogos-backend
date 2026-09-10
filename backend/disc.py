@@ -1,9 +1,9 @@
-"""Módulo DART — Avaliação de Perfil Comportamental.
+"""Módulo DISC — Avaliação de Perfil Comportamental.
 
 Fluxo (24/25 da especificação):
   1. RH/Admin cria a avaliação para um avaliando -> gera token e retorna o link.
-  2. O avaliando abre /dart/avaliacao/{token} numa página independente.
-  3. Ao concluir, o frontend envia as respostas para /api/public/dart/{token}/respostas.
+  2. O avaliando abre /disc/avaliacao/{token} numa página independente.
+  3. Ao concluir, o frontend envia as respostas para /api/public/disc/{token}/respostas.
   4. O backend REVALIDA tudo (não confia no frontend), recalcula pontuações,
      determina perfis/codenome, salva avaliação e respostas numa única transação
      e marca como concluída.
@@ -24,11 +24,11 @@ from pydantic import BaseModel
 
 from database import get_db
 from deps import get_current_user, log_action
-from dart_data import DART_CODENAMES, DART_PERFIS_ROTULO, DART_PERFIS
+from disc_data import DISC_CODENAMES, DISC_PERFIS_ROTULO, DISC_PERFIS
 
 router = APIRouter()
 
-DART_TOTAL_QUESTOES = 25
+DISC_TOTAL_QUESTOES = 25
 
 # ── Modelos Pydantic ──────────────────────────────────────────────────────────
 
@@ -49,7 +49,7 @@ class SalvarProgressoRequest(BaseModel):
 
 # ── Helpers de permissão ──────────────────────────────────────────────────────
 
-def _pode_ver_dart(user) -> bool:
+def _pode_ver_disc(user) -> bool:
     """CEO, diretoria, RH e administradores podem visualizar os resultados."""
     if not user:
         return False
@@ -64,7 +64,7 @@ def _pode_ver_dart(user) -> bool:
 
 
 def _poder_criar(user) -> bool:
-    return _pode_ver_dart(user)
+    return _pode_ver_disc(user)
 
 
 # ── Helpers de cálculo ────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ def _calcular_resultado(respostas_validadas: list) -> dict:
 
     respostas_validadas: lista de {perfil, pontuacao}
     """
-    pontos = {p: 0 for p in DART_PERFIS}
+    pontos = {p: 0 for p in DISC_PERFIS}
     for r in respostas_validadas:
         pontos[r["perfil"]] += r["pontuacao"]
     total = sum(pontos.values())
@@ -83,7 +83,7 @@ def _calcular_resultado(respostas_validadas: list) -> dict:
     perfis_ordenados = [p for p, _ in ranking]
 
     combinacao = "+".join(sorted(perfis_ordenados)) if perfis_ordenados else ""
-    codenome = DART_CODENAMES.get(combinacao, "")
+    codenome = DISC_CODENAMES.get(combinacao, "")
 
     resultado = {
         "pontuacao_analista": pontos.get("analista", 0),
@@ -110,7 +110,7 @@ def _carregar_dados_versao(db, versao_id: str) -> dict:
     """
     perguntas = {}
     q_rows = db.execute(
-        "SELECT id, texto FROM dart_perguntas WHERE versao_id=%s AND status='ativo' ORDER BY ordem",
+        "SELECT id, texto FROM disc_perguntas WHERE versao_id=%s AND status='ativo' ORDER BY ordem",
         (versao_id,),
     ).fetchall()
     for q in q_rows:
@@ -120,7 +120,7 @@ def _carregar_dados_versao(db, versao_id: str) -> dict:
             "alternativas": {},
         }
     a_rows = db.execute(
-        """SELECT id, pergunta_id, texto, perfil FROM dart_alternativas
+        """SELECT id, pergunta_id, texto, perfil FROM disc_alternativas
            WHERE pergunta_id = ANY(%s) ORDER BY ordem""",
         (list(perguntas.keys()),),
     ).fetchall()
@@ -135,16 +135,16 @@ def _carregar_dados_versao(db, versao_id: str) -> dict:
 
 # ── Endpoints públicos (página independente) ─────────────────────────────────
 
-DART_HTML = Path(__file__).parent / "static" / "dart.html"
+DISC_HTML = Path(__file__).parent / "static" / "disc.html"
 
-@router.get("/dart/avaliacao/{token}", include_in_schema=False)
-def pagina_dart(token: str):
+@router.get("/disc/avaliacao/{token}", include_in_schema=False)
+def pagina_disc(token: str):
     """Serva a página independente do teste (abre em nova aba)."""
-    return FileResponse(DART_HTML, media_type="text/html")
+    return FileResponse(DISC_HTML, media_type="text/html")
 
 
 def _validar_avaliacao_por_token(db, token: str):
-    av = db.execute("SELECT * FROM dart_avaliacoes WHERE token=%s", (token,)).fetchone()
+    av = db.execute("SELECT * FROM disc_avaliacoes WHERE token=%s", (token,)).fetchone()
     if not av:
         raise HTTPException(status_code=404, detail="Avaliação não encontrada ou link inválido.")
     av = dict(av)
@@ -158,8 +158,8 @@ def _validar_avaliacao_por_token(db, token: str):
     return av, av.get("status")
 
 
-@router.get("/api/public/dart/{token}/info")
-def dart_info(token: str, db=Depends(get_db)):
+@router.get("/api/public/disc/{token}/info")
+def disc_info(token: str, db=Depends(get_db)):
     av, status = _validar_avaliacao_por_token(db, token)
     avaliando = db.execute(
         "SELECT name, role, dept, photo_url FROM users WHERE key=%s", (av["avaliando_id"],)
@@ -167,7 +167,7 @@ def dart_info(token: str, db=Depends(get_db)):
     if not avaliando:
         raise HTTPException(status_code=404, detail="Avaliando não encontrado.")
     versao = db.execute(
-        "SELECT nome, total_questoes FROM dart_teste_versoes WHERE id=%s", (av["versao_id"],)
+        "SELECT nome, total_questoes FROM disc_teste_versoes WHERE id=%s", (av["versao_id"],)
     ).fetchone()
     return {
         "status": status,
@@ -177,22 +177,22 @@ def dart_info(token: str, db=Depends(get_db)):
             "dept": avaliando["dept"] or "",
             "photo_url": avaliando["photo_url"] or "",
         },
-        "versao": versao["nome"] if versao else "DART",
-        "total_questoes": versao["total_questoes"] if versao else DART_TOTAL_QUESTOES,
+        "versao": versao["nome"] if versao else "DISC",
+        "total_questoes": versao["total_questoes"] if versao else DISC_TOTAL_QUESTOES,
         "pode_responder": status in ("pendente", "em_andamento"),
         "ja_concluida": status == "concluida",
     }
 
 
-@router.get("/api/public/dart/{token}/perguntas")
-def dart_perguntas(token: str, db=Depends(get_db)):
+@router.get("/api/public/disc/{token}/perguntas")
+def disc_perguntas(token: str, db=Depends(get_db)):
     av, status = _validar_avaliacao_por_token(db, token)
     if status == "expirada":
         raise HTTPException(status_code=400, detail="O prazo desta avaliação expirou.")
     if status == "concluida":
         raise HTTPException(status_code=400, detail="Esta avaliação já foi concluída.")
     if status == "pendente":
-        db.execute("UPDATE dart_avaliacoes SET status='em_andamento', data_inicio=%s WHERE id=%s",
+        db.execute("UPDATE disc_avaliacoes SET status='em_andamento', data_inicio=%s WHERE id=%s",
                    (datetime.datetime.utcnow().isoformat(), av["id"]))
         db.commit()
 
@@ -207,27 +207,27 @@ def dart_perguntas(token: str, db=Depends(get_db)):
     return {"perguntas": dados}
 
 
-@router.get("/api/public/dart/{token}/progresso")
-def dart_progresso(token: str, db=Depends(get_db)):
+@router.get("/api/public/disc/{token}/progresso")
+def disc_progresso(token: str, db=Depends(get_db)):
     av, status = _validar_avaliacao_por_token(db, token)
     if status == "concluida":
         raise HTTPException(status_code=400, detail="Esta avaliação já foi concluída.")
     respostas = db.execute(
-        "SELECT alternativa_id, pergunta_id, perfil_da_alternativa, pontuacao FROM dart_respostas WHERE avaliacao_id=%s",
+        "SELECT alternativa_id, pergunta_id, perfil_da_alternativa, pontuacao FROM disc_respostas WHERE avaliacao_id=%s",
         (av["id"],),
     ).fetchall()
     return {"respostas": [dict(r) for r in respostas]}
 
 
-@router.post("/api/public/dart/{token}/progresso")
-def dart_salvar_progresso(token: str, body: SalvarProgressoRequest, db=Depends(get_db)):
+@router.post("/api/public/disc/{token}/progresso")
+def disc_salvar_progresso(token: str, body: SalvarProgressoRequest, db=Depends(get_db)):
     av, status = _validar_avaliacao_por_token(db, token)
     if status == "expirada":
         raise HTTPException(status_code=400, detail="O prazo desta avaliação expirou.")
     if status == "concluida":
         raise HTTPException(status_code=400, detail="Esta avaliação já foi concluída.")
     if status == "pendente":
-        db.execute("UPDATE dart_avaliacoes SET status='em_andamento', data_inicio=%s WHERE id=%s",
+        db.execute("UPDATE disc_avaliacoes SET status='em_andamento', data_inicio=%s WHERE id=%s",
                    (datetime.datetime.utcnow().isoformat(), av["id"]))
     perguntas = _carregar_dados_versao(db, av["versao_id"])
     now = datetime.datetime.utcnow().isoformat()
@@ -240,7 +240,7 @@ def dart_salvar_progresso(token: str, body: SalvarProgressoRequest, db=Depends(g
         if pts not in (1, 2, 3, 4):
             continue
         db.execute(
-            """INSERT INTO dart_respostas (id, avaliacao_id, pergunta_id, alternativa_id, perfil_da_alternativa, pontuacao, created_at)
+            """INSERT INTO disc_respostas (id, avaliacao_id, pergunta_id, alternativa_id, perfil_da_alternativa, pontuacao, created_at)
                VALUES (%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (avaliacao_id, pergunta_id)
                DO UPDATE SET alternativa_id=%s, perfil_da_alternativa=%s, pontuacao=%s""",
@@ -251,8 +251,8 @@ def dart_salvar_progresso(token: str, body: SalvarProgressoRequest, db=Depends(g
     return {"ok": True}
 
 
-@router.post("/api/public/dart/{token}/respostas")
-def dart_enviar_respostas(token: str, body: EnviarRespostasRequest, db=Depends(get_db)):
+@router.post("/api/public/disc/{token}/respostas")
+def disc_enviar_respostas(token: str, body: EnviarRespostasRequest, db=Depends(get_db)):
     av, status = _validar_avaliacao_por_token(db, token)
     if status == "expirada":
         raise HTTPException(status_code=400, detail="O prazo desta avaliação expirou.")
@@ -260,8 +260,8 @@ def dart_enviar_respostas(token: str, body: EnviarRespostasRequest, db=Depends(g
         raise HTTPException(status_code=400, detail="Esta avaliação já foi concluída. Não é possível reenviar.")
 
     # ── Validação completa no backend (não confiar no front) ──
-    versao = db.execute("SELECT total_questoes FROM dart_teste_versoes WHERE id=%s", (av["versao_id"],)).fetchone()
-    n_necessario = versao["total_questoes"] if versao else DART_TOTAL_QUESTOES
+    versao = db.execute("SELECT total_questoes FROM disc_teste_versoes WHERE id=%s", (av["versao_id"],)).fetchone()
+    n_necessario = versao["total_questoes"] if versao else DISC_TOTAL_QUESTOES
 
     perguntas = _carregar_dados_versao(db, av["versao_id"])
     if len(perguntas) != n_necessario:
@@ -313,7 +313,7 @@ def dart_enviar_respostas(token: str, body: EnviarRespostasRequest, db=Depends(g
     now = datetime.datetime.utcnow().isoformat()
     try:
         db.execute(
-            """UPDATE dart_avaliacoes SET
+            """UPDATE disc_avaliacoes SET
                  status='concluida', data_conclusao=%s,
                  pontuacao_analista=%s, pontuacao_executor=%s, pontuacao_planejador=%s, pontuacao_comunicador=%s,
                  pontuacao_total=%s, perfil_principal=%s, segundo_perfil=%s, terceiro_perfil=%s, quarto_perfil=%s,
@@ -325,17 +325,17 @@ def dart_enviar_respostas(token: str, body: EnviarRespostasRequest, db=Depends(g
              resultado["terceiro_perfil"], resultado["quarto_perfil"],
              resultado["combinacao"], resultado["codenome"], av["id"]),
         )
-        db.execute("DELETE FROM dart_respostas WHERE avaliacao_id=%s", (av["id"],))
+        db.execute("DELETE FROM disc_respostas WHERE avaliacao_id=%s", (av["id"],))
         for r in respostas_validadas:
             db.execute(
-                """INSERT INTO dart_respostas (id, avaliacao_id, pergunta_id, alternativa_id, perfil_da_alternativa, pontuacao, created_at)
+                """INSERT INTO disc_respostas (id, avaliacao_id, pergunta_id, alternativa_id, perfil_da_alternativa, pontuacao, created_at)
                    VALUES (%s,%s,%s,%s,%s,%s,%s)""",
                 (str(uuid.uuid4()), av["id"], r["pergunta_id"], r["alternativa_id"],
                  r["perfil"], r["pontuacao"], now),
             )
-        # Propaga perfil predominante para o campo users.dart (se ainda vazio)
+        # Propaga perfil predominante para o campo users.disc (se ainda vazio)
         db.execute(
-            "UPDATE users SET dart=%s WHERE key=%s AND (dart IS NULL OR dart='')",
+            "UPDATE users SET disc=%s WHERE key=%s AND (disc IS NULL OR disc='')",
             (resultado["perfil_principal"], av["avaliando_id"]),
         )
         db.commit()
@@ -352,17 +352,17 @@ def dart_enviar_respostas(token: str, body: EnviarRespostasRequest, db=Depends(g
 
 # ── Endpoints autenticados (criação + painéis) ───────────────────────────────
 
-@router.post("/api/dart/avaliacoes")
+@router.post("/api/disc/avaliacoes")
 def criar_avaliacao(body: CriarAvaliacaoRequest, user=Depends(get_current_user), db=Depends(get_db)):
     if not _poder_criar(user):
-        raise HTTPException(status_code=403, detail="Sem permissão para criar avaliações DART.")
+        raise HTTPException(status_code=403, detail="Sem permissão para criar avaliações DISC.")
     avaliando = db.execute("SELECT key, name FROM users WHERE key=%s", (body.avaliando_id,)).fetchone()
     if not avaliando:
         raise HTTPException(status_code=404, detail="Avaliando não encontrado.")
 
     # Impede duplicação de avaliação ativa para o mesmo avaliando
     dup = db.execute(
-        """SELECT id FROM dart_avaliacoes
+        """SELECT id FROM disc_avaliacoes
            WHERE avaliando_id=%s AND status IN ('pendente','em_andamento')""",
         (body.avaliando_id,),
     ).fetchone()
@@ -370,7 +370,7 @@ def criar_avaliacao(body: CriarAvaliacaoRequest, user=Depends(get_current_user),
         raise HTTPException(status_code=409, detail="Este colaborador já possui uma avaliação pendente ou em andamento.")
 
     versao = db.execute(
-        "SELECT id FROM dart_teste_versoes WHERE ativo=1 ORDER BY created_at DESC LIMIT 1"
+        "SELECT id FROM disc_teste_versoes WHERE ativo=1 ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
     if not versao:
         raise HTTPException(status_code=500, detail="Nenhuma versão do teste ativa.")
@@ -379,14 +379,14 @@ def criar_avaliacao(body: CriarAvaliacaoRequest, user=Depends(get_current_user),
     token = uuid.uuid4().hex
     now = datetime.datetime.utcnow().isoformat()
     db.execute(
-        """INSERT INTO dart_avaliacoes (id, avaliando_id, solicitante_id, token, versao_id, status, data_inicio, created_at)
+        """INSERT INTO disc_avaliacoes (id, avaliando_id, solicitante_id, token, versao_id, status, data_inicio, created_at)
            VALUES (%s,%s,%s,%s,%s,'pendente',NULL,%s)""",
         (av_id, body.avaliando_id, user["key"], token, versao["id"], now),
     )
     db.commit()
-    log_action(db, user["key"], body.avaliando_id, "DART - Criar Avaliação",
-               f"Criou avaliação DART para {avaliando['name']}")
-    link = f"/dart/avaliacao/{token}"
+    log_action(db, user["key"], body.avaliando_id, "DISC - Criar Avaliação",
+               f"Criou avaliação DISC para {avaliando['name']}")
+    link = f"/disc/avaliacao/{token}"
     return {
         "id": av_id,
         "avaliando_id": body.avaliando_id,
@@ -424,7 +424,7 @@ def _anexa_dados_colaborador(db, itens):
     return resultado
 
 
-@router.get("/api/dart/avaliacoes")
+@router.get("/api/disc/avaliacoes")
 def listar_avaliacoes(
     user=Depends(get_current_user),
     db=Depends(get_db),
@@ -435,10 +435,10 @@ def listar_avaliacoes(
     search: Optional[str] = None,
     ordenar_por: Optional[str] = None,
 ):
-    if not _pode_ver_dart(user):
-        raise HTTPException(status_code=403, detail="Sem permissão para visualizar resultados DART.")
+    if not _pode_ver_disc(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para visualizar resultados DISC.")
 
-    sql = "SELECT * FROM dart_avaliacoes WHERE 1=1"
+    sql = "SELECT * FROM disc_avaliacoes WHERE 1=1"
     params = []
     if status:
         sql += " AND status=%s"
@@ -467,11 +467,11 @@ def listar_avaliacoes(
     return {"avaliacoes": itens}
 
 
-@router.get("/api/dart/avaliacoes/{avaliacao_id}")
+@router.get("/api/disc/avaliacoes/{avaliacao_id}")
 def detalhe_avaliacao(avaliacao_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    if not _pode_ver_dart(user):
-        raise HTTPException(status_code=403, detail="Sem permissão para visualizar resultados DART.")
-    av = db.execute("SELECT * FROM dart_avaliacoes WHERE id=%s", (avaliacao_id,)).fetchone()
+    if not _pode_ver_disc(user):
+        raise HTTPException(status_code=403, detail="Sem permissão para visualizar resultados DISC.")
+    av = db.execute("SELECT * FROM disc_avaliacoes WHERE id=%s", (avaliacao_id,)).fetchone()
     if not av:
         raise HTTPException(status_code=404, detail="Avaliação não encontrada.")
     av = dict(av)
@@ -492,7 +492,7 @@ def detalhe_avaliacao(avaliacao_id: str, user=Depends(get_current_user), db=Depe
             dept_nome = d["nome"]
 
     respostas = db.execute(
-        "SELECT pergunta_id, perfil_da_alternativa, pontuacao FROM dart_respostas WHERE avaliacao_id=%s ORDER BY created_at",
+        "SELECT pergunta_id, perfil_da_alternativa, pontuacao FROM disc_respostas WHERE avaliacao_id=%s ORDER BY created_at",
         (avaliacao_id,),
     ).fetchall()
 
@@ -504,20 +504,20 @@ def detalhe_avaliacao(avaliacao_id: str, user=Depends(get_current_user), db=Depe
         "empresa_id": u["empresa_id"] if u else None,
         "hire_date": u["hire_date"] if u else "",
         "respostas": [dict(r) for r in respostas],
-        "perfis_rotulo": DART_PERFIS_ROTULO,
+        "perfis_rotulo": DISC_PERFIS_ROTULO,
     }
 
 
-@router.get("/api/dart/filtros")
-def filtros_dart(user=Depends(get_current_user), db=Depends(get_db)):
-    if not _pode_ver_dart(user):
+@router.get("/api/disc/filtros")
+def filtros_disc(user=Depends(get_current_user), db=Depends(get_db)):
+    if not _pode_ver_disc(user):
         raise HTTPException(status_code=403, detail="Sem permissão.")
     departamentos = [dict(r) for r in db.execute(
         "SELECT id, nome FROM departamentos ORDER BY nome").fetchall()]
     cargos = [dict(r) for r in db.execute(
         "SELECT id, nome FROM cargos WHERE COALESCE(ativo,1)=1 ORDER BY nome").fetchall()]
     return {
-        "perfis": [{"valor": p, "rotulo": DART_PERFIS_ROTULO.get(p, p)} for p in DART_PERFIS],
+        "perfis": [{"valor": p, "rotulo": DISC_PERFIS_ROTULO.get(p, p)} for p in DISC_PERFIS],
         "departamentos": departamentos,
         "cargos": cargos,
     }

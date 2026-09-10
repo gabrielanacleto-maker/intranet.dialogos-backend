@@ -151,36 +151,36 @@ def seed_estrutura_padrao(cursor, empresa_id):
     _seed_catalogo(cursor, "senioridades", empresa_id, SENIORIDADES_PADRAO)
     _seed_catalogo(cursor, "niveis_hierarquicos", empresa_id, NIVEIS_HIERARQUICOS_PADRAO)
 
-def _seed_dart_v1(cursor):
+def _seed_disc_v1(cursor):
     """Cria a versão v1 do teste (se não existir) e insere as 25 perguntas
     com as alternativas associadas aos perfis. A ordem das alternativas é
     embaralhada por pergunta (o perfil não fica sempre na mesma posição)."""
     import random
-    from dart_data import DART_QUESTIONS_V1, DART_PERFIS
+    from disc_data import DISC_QUESTIONS_V1, DISC_PERFIS
 
-    cursor.execute("SELECT id FROM dart_teste_versoes WHERE nome=%s", ("DART v1.0",))
+    cursor.execute("SELECT id FROM disc_teste_versoes WHERE nome=%s", ("DISC v1.0",))
     row = cursor.fetchone()
     if row:
         return
     versao_id = str(uuid.uuid4())
     now = datetime.datetime.utcnow().isoformat()
     cursor.execute(
-        "INSERT INTO dart_teste_versoes (id, nome, total_questoes, ativo, created_at) VALUES (%s,%s,%s,%s,%s)",
-        (versao_id, "DART v1.0", len(DART_QUESTIONS_V1), 1, now),
+        "INSERT INTO disc_teste_versoes (id, nome, total_questoes, ativo, created_at) VALUES (%s,%s,%s,%s,%s)",
+        (versao_id, "DISC v1.0", len(DISC_QUESTIONS_V1), 1, now),
     )
     qids = []
-    for i, q in enumerate(DART_QUESTIONS_V1):
+    for i, q in enumerate(DISC_QUESTIONS_V1):
         qid = str(uuid.uuid4())
         qids.append(qid)
         cursor.execute(
-            "INSERT INTO dart_perguntas (id, versao_id, texto, status, ordem, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO disc_perguntas (id, versao_id, texto, status, ordem, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
             (qid, versao_id, q["texto"], "ativo", i + 1, now),
         )
-        perfis_ord = list(DART_PERFIS)
+        perfis_ord = list(DISC_PERFIS)
         random.shuffle(perfis_ord)
         for j, perfil in enumerate(perfis_ord):
             cursor.execute(
-                "INSERT INTO dart_alternativas (id, pergunta_id, texto, perfil, ordem, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO disc_alternativas (id, pergunta_id, texto, perfil, ordem, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
                 (str(uuid.uuid4()), qid, q["alternativas"][perfil], perfil, j + 1, now),
             )
 
@@ -189,6 +189,29 @@ def init_db():
     c = conn.cursor()
 
     try:
+        # ── Migração DART → DISC (renomeia tabelas/colunas existentes) ──
+        _DISC_RENAMES = [
+            ("dart_teste_versoes", "disc_teste_versoes"),
+            ("dart_perguntas", "disc_perguntas"),
+            ("dart_alternativas", "disc_alternativas"),
+            ("dart_avaliacoes", "disc_avaliacoes"),
+            ("dart_respostas", "disc_respostas"),
+        ]
+        for old, new in _DISC_RENAMES:
+            if _table_exists(c, old) and not _table_exists(c, new):
+                c.execute(f"ALTER TABLE {old} RENAME TO {new}")
+        for idx in (
+            "idx_dart_perguntas_versao",
+            "idx_dart_alt_pergunta",
+            "idx_dart_avaliacoes_avaliando",
+            "idx_dart_avaliacoes_status",
+            "idx_dart_respostas_avaliacao",
+        ):
+            c.execute(f"DROP INDEX IF EXISTS {idx}")
+        if _column_exists(c, 'users', 'dart') and not _column_exists(c, 'users', 'disc'):
+            c.execute("ALTER TABLE users RENAME COLUMN dart TO disc")
+        _safe_update_existing(c, 'disc_teste_versoes', "nome='DISC v1.0'", "nome='DART v1.0'")
+
         _safe_add_column(c, 'users', 'about_me', "about_me TEXT DEFAULT ''")
         _safe_add_column(c, 'users', 'is_diretor', "is_diretor INTEGER DEFAULT 0")
         _safe_add_column(c, 'users', 'is_leader', "is_leader INTEGER DEFAULT 0")
@@ -213,7 +236,7 @@ def init_db():
         _safe_add_column(c, 'users', 'departamento_id', "departamento_id TEXT DEFAULT NULL")
         _safe_add_column(c, 'users', 'empresa_id', "empresa_id TEXT DEFAULT NULL")
         _safe_add_column(c, 'users', 'email', "email TEXT DEFAULT ''")
-        _safe_add_column(c, 'users', 'dart', "dart TEXT DEFAULT ''")
+        _safe_add_column(c, 'users', 'disc', "disc TEXT DEFAULT ''")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS cargos (
@@ -342,6 +365,7 @@ def init_db():
                 author_key TEXT NOT NULL,
                 text TEXT NOT NULL,
                 rating INTEGER,
+                criteria TEXT DEFAULT '{}',
                 is_private INTEGER DEFAULT 0,
                 reactions TEXT DEFAULT '{}',
                 created_at TEXT NOT NULL,
@@ -353,6 +377,7 @@ def init_db():
         try:
             c.execute("ALTER TABLE colleague_feedback ADD COLUMN IF NOT EXISTS rating INTEGER")
             c.execute("ALTER TABLE colleague_feedback ADD COLUMN IF NOT EXISTS is_private INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE colleague_feedback ADD COLUMN IF NOT EXISTS criteria TEXT DEFAULT '{}'")
         except Exception:
             pass
 
@@ -835,9 +860,9 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_respostas_pesquisa ON pesquisa_respostas(pesquisa_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_respostas_user ON pesquisa_respostas(user_key)")
 
-        # ── DART — Avaliação de Perfil Comportamental ──
+        # ── DISC — Avaliação de Perfil Comportamental ──
         c.execute("""
-            CREATE TABLE IF NOT EXISTS dart_teste_versoes (
+            CREATE TABLE IF NOT EXISTS disc_teste_versoes (
                 id TEXT PRIMARY KEY,
                 nome TEXT NOT NULL,
                 total_questoes INTEGER DEFAULT 25,
@@ -847,7 +872,7 @@ def init_db():
         """)
 
         c.execute("""
-            CREATE TABLE IF NOT EXISTS dart_perguntas (
+            CREATE TABLE IF NOT EXISTS disc_perguntas (
                 id TEXT PRIMARY KEY,
                 versao_id TEXT NOT NULL,
                 texto TEXT NOT NULL,
@@ -856,10 +881,10 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_perguntas_versao ON dart_perguntas(versao_id, status, ordem)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_disc_perguntas_versao ON disc_perguntas(versao_id, status, ordem)")
 
         c.execute("""
-            CREATE TABLE IF NOT EXISTS dart_alternativas (
+            CREATE TABLE IF NOT EXISTS disc_alternativas (
                 id TEXT PRIMARY KEY,
                 pergunta_id TEXT NOT NULL,
                 texto TEXT NOT NULL,
@@ -868,10 +893,10 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_alt_pergunta ON dart_alternativas(pergunta_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_disc_alt_pergunta ON disc_alternativas(pergunta_id)")
 
         c.execute("""
-            CREATE TABLE IF NOT EXISTS dart_avaliacoes (
+            CREATE TABLE IF NOT EXISTS disc_avaliacoes (
                 id TEXT PRIMARY KEY,
                 avaliando_id TEXT NOT NULL,
                 solicitante_id TEXT DEFAULT NULL,
@@ -895,12 +920,12 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
-        _safe_add_column(c, 'dart_avaliacoes', 'created_at', "created_at TEXT NOT NULL DEFAULT ''")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_avaliacoes_avaliando ON dart_avaliacoes(avaliando_id)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_avaliacoes_status ON dart_avaliacoes(status)")
+        _safe_add_column(c, 'disc_avaliacoes', 'created_at', "created_at TEXT NOT NULL DEFAULT ''")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_disc_avaliacoes_avaliando ON disc_avaliacoes(avaliando_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_disc_avaliacoes_status ON disc_avaliacoes(status)")
 
         c.execute("""
-            CREATE TABLE IF NOT EXISTS dart_respostas (
+            CREATE TABLE IF NOT EXISTS disc_respostas (
                 id TEXT PRIMARY KEY,
                 avaliacao_id TEXT NOT NULL,
                 pergunta_id TEXT NOT NULL,
@@ -911,12 +936,12 @@ def init_db():
                 UNIQUE(avaliacao_id, pergunta_id)
             )
         """)
-        _safe_add_column(c, 'dart_respostas', 'alternativa_id', "alternativa_id TEXT DEFAULT NULL")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_dart_respostas_avaliacao ON dart_respostas(avaliacao_id)")
+        _safe_add_column(c, 'disc_respostas', 'alternativa_id', "alternativa_id TEXT DEFAULT NULL")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_disc_respostas_avaliacao ON disc_respostas(avaliacao_id)")
 
         # Seed idempotente da versão v1 + 25 perguntas
-        from dart_data import DART_QUESTIONS_V1, DART_PERFIS
-        _seed_dart_v1(c)
+        from disc_data import DISC_QUESTIONS_V1, DISC_PERFIS
+        _seed_disc_v1(c)
 
         conn.commit()
         print("Banco de dados inicializado.")

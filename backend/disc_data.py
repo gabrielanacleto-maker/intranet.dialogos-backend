@@ -1,14 +1,14 @@
-"""Dados de configuração do DART — Avaliação de Perfil Comportamental.
+"""Dados de configuração do DISC — Avaliação de Perfil Comportamental.
 
 As perguntas ficam aqui apenas como seed inicial (inseridas na tabela
-`dart_perguntas`/`dart_alternativas` de forma idempotente). A partir daí o
+`disc_perguntas`/`disc_alternativas` de forma idempotente). A partir daí o
 questionário pode ser administrado/editado via banco, permitindo gerar novas
 versões do teste sem reescrever a aplicação.
 """
 
-DART_PERFIS = ["analista", "executor", "comunicador", "planejador"]
+DISC_PERFIS = ["analista", "executor", "comunicador", "planejador"]
 
-DART_PERFIS_ROTULO = {
+DISC_PERFIS_ROTULO = {
     "analista": "Analista",
     "executor": "Executor",
     "comunicador": "Comunicador",
@@ -18,7 +18,7 @@ DART_PERFIS_ROTULO = {
 # Codenomes configuráveis (mapeiam combinações ordenadas de perfis -> nome).
 # A regra de corte que decide quais perfis entram na combinação é configurável
 # e deve ser definida posteriormente; não implementamos ainda uma regra fixa.
-DART_CODENAMES = {
+DISC_CODENAMES = {
     "analista": "O Investigador",
     "executor": "O Realizador",
     "comunicador": "O Influenciador",
@@ -39,7 +39,7 @@ DART_CODENAMES = {
 # 25 questões situacionais. Cada alternativa é associada a um perfil.
 # A ordem das alternativas é embaralhada por pergunta no seed (ordem variada),
 # para o perfil não ficar sempre na mesma posição.
-DART_QUESTIONS_V1 = [
+DISC_QUESTIONS_V1 = [
     {
         "texto": "Você recebeu um projeto importante, mas as informações ainda estão incompletas. O que você tende a fazer primeiro?",
         "alternativas": {

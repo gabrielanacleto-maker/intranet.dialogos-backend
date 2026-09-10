@@ -17,7 +17,7 @@ from deps import (security, get_current_user, get_current_user_from_token,
                   get_optional_user, require_level, log_action, _invalidate_user_cache)
 from auth import create_token, verify_token, hash_password, check_password
 from rh_estrutura import router as rh_estrutura_router
-from dart import router as dart_router
+from disc import router as disc_router
 
 import cloudinary
 import cloudinary.uploader
@@ -224,7 +224,7 @@ cloudinary.config(
 app = FastAPI(title="Intranet Diálogos API", lifespan=lifespan)
 
 app.include_router(rh_estrutura_router)
-app.include_router(dart_router)
+app.include_router(disc_router)
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS")
 if CORS_ORIGINS:
@@ -483,7 +483,7 @@ def login(body: LoginRequest, db=Depends(get_db)):
                 "senioridade_id": user.get("senioridade_id"),
                 "departamento_id": user.get("departamento_id"),
                 "empresa_id": user.get("empresa_id"),
-                "dart": user.get("dart", ""),
+                "disc": user.get("disc", ""),
             }
         }
 
@@ -507,7 +507,7 @@ def auth_me(user=Depends(get_current_user)):
         "senioridade_id": user.get("senioridade_id"),
         "departamento_id": user.get("departamento_id"),
         "empresa_id": user.get("empresa_id"),
-        "dart": user.get("dart", ""),
+        "disc": user.get("disc", ""),
     }
 
 @app.post("/api/auth/change-password")
@@ -1565,16 +1565,16 @@ def update_about_me(body: dict, user=Depends(get_current_user), db=Depends(get_d
     _invalidate_user_cache(user["key"])
     return {"ok": True}
 
-# ── DART (Perfis Comportamentais) ────────────────────────────────────────────
+# ── DISC (Perfis Comportamentais) ────────────────────────────────────────────
 
-DART_DIMENSOES_VALIDAS = {"analista", "executor", "comunicador", "planejador"}
+DISC_DIMENSOES_VALIDAS = {"analista", "executor", "comunicador", "planejador"}
 
-def _validate_dart(dart: str):
-    """Valida a chave do perfil DART. Retorna a chave canônica ordenada."""
-    dims = [d.strip().lower() for d in dart.split("+") if d.strip()]
+def _validate_disc(disc: str):
+    """Valida a chave do perfil DISC. Retorna a chave canônica ordenada."""
+    dims = [d.strip().lower() for d in disc.split("+") if d.strip()]
     if not dims or len(dims) > 4:
         return None
-    if len(set(dims)) != len(dims) or not set(dims).issubset(DART_DIMENSOES_VALIDAS):
+    if len(set(dims)) != len(dims) or not set(dims).issubset(DISC_DIMENSOES_VALIDAS):
         return None
     return "+".join(sorted(dims))
 
@@ -1586,19 +1586,19 @@ def set_comportamental(target_key: str, body: ComportamentalRequest,
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
     if user["key"] != target_key and user["access_level"] < 2:
         raise HTTPException(status_code=403, detail="Sem permissão.")
-    dart = (body.dart or "").strip()
-    if dart:
-        canonical = _validate_dart(dart)
+    disc = (body.disc or "").strip()
+    if disc:
+        canonical = _validate_disc(disc)
         if not canonical:
             raise HTTPException(status_code=400, detail="Perfil comportamental inválido.")
     else:
         canonical = ""
-    db.execute("UPDATE users SET dart=%s WHERE key=%s", (canonical, target_key))
+    db.execute("UPDATE users SET disc=%s WHERE key=%s", (canonical, target_key))
     db.commit()
     _invalidate_user_cache(target_key)
     log_action(db, user["key"], target_key, "Perfil Comportamental",
-               f"Definiu perfil DART: {canonical or '(removido)'}")
-    return {"ok": True, "dart": canonical}
+               f"Definiu perfil DISC: {canonical or '(removido)'}")
+    return {"ok": True, "disc": canonical}
 
 
 @app.delete("/api/mural/{item_id}")
@@ -2614,6 +2614,7 @@ def list_colleague_feedback(limit: int = 50, offset: int = 0,
     for r in rows:
         entry = dict(r)
         entry["reactions"] = json.loads(entry.get("reactions") or "{}")
+        entry["criteria"] = json.loads(entry.get("criteria") or "{}")
         entry["is_private"] = bool(entry.get("is_private"))
         can_delete = user["key"] == entry["author_key"] or user.get("is_admin")
         entry["can_delete"] = can_delete
@@ -2640,6 +2641,7 @@ def get_colleague_feedback(target_key: str, user=Depends(get_current_user), db=D
     for r in rows:
         entry = dict(r)
         entry["reactions"] = json.loads(entry.get("reactions") or "{}")
+        entry["criteria"] = json.loads(entry.get("criteria") or "{}")
         entry["is_private"] = bool(entry.get("is_private"))
         can_delete = user["key"] == entry["author_key"] or user.get("is_admin")
         entry["can_delete"] = can_delete
@@ -2650,12 +2652,26 @@ def get_colleague_feedback(target_key: str, user=Depends(get_current_user), db=D
 def create_colleague_feedback(body: dict, user=Depends(get_current_user), db=Depends(get_db)):
     target_key = body.get("target_user_key") or body.get("target_key", "")
     text = body.get("text", "").strip()[:6000]
-    rating = body.get("rating")
     is_private = bool(body.get("is_private", False))
     if not text:
         raise HTTPException(status_code=400, detail="Feedback não pode ser vazio.")
     if not target_key:
         raise HTTPException(status_code=400, detail="Destinatário do feedback não informado.")
+
+    criteria_keys = ("responsabilidade", "atendimento", "dominio", "pontualidade", "equipe")
+    criteria = {}
+    raw_criteria = body.get("criteria")
+    if isinstance(raw_criteria, dict):
+        for k in criteria_keys:
+            v = raw_criteria.get(k)
+            if isinstance(v, (int, float)) and 1 <= v <= 5:
+                criteria[k] = int(v)
+            else:
+                raise HTTPException(status_code=400, detail=f"Critério '{k}' deve ter nota de 1 a 5.")
+
+    rating = body.get("rating")
+    if criteria:
+        rating = round(sum(criteria.values()) / len(criteria_keys) * 2)
 
     fid = str(uuid.uuid4())
     now = datetime.datetime.utcnow().isoformat()
@@ -2687,9 +2703,11 @@ def create_colleague_feedback(body: dict, user=Depends(get_current_user), db=Dep
         trow = db.execute("SELECT name FROM users WHERE key=%s", (target_key,)).fetchone()
         if not trow:
             raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        if rating is None:
+            raise HTTPException(status_code=400, detail="Nota do feedback não informada.")
         db.execute(
-            "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, rating, reactions, created_at, is_private) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (fid, target_key, user["key"], text, rating, "{}", now, 1 if is_private else 0)
+            "INSERT INTO colleague_feedback (id, target_user_key, author_key, text, rating, criteria, reactions, created_at, is_private) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (fid, target_key, user["key"], text, rating, json.dumps(criteria), "{}", now, 1 if is_private else 0)
         )
         log_audit(db, user["key"], "colleague_feedback_create", target_key,
                   f"Feedback {'privado ' if is_private else ''}de {user['name']} para {trow['name']}")
@@ -4769,6 +4787,34 @@ def get_metric_feedbacks(user=Depends(get_current_user), db=Depends(get_db)):
         (user["key"],)
     ).fetchone()
     return {"count": row["cnt"] if row else 0}
+
+@app.get("/api/metricas/feedbacks-criterias")
+def get_metric_feedback_criterias(user=Depends(get_current_user), db=Depends(get_db)):
+    criteria_keys = ("responsabilidade", "atendimento", "dominio", "pontualidade", "equipe")
+    rows = db.execute(
+        "SELECT criteria FROM colleague_feedback WHERE criteria IS NOT NULL AND criteria != '' AND criteria != '{}'"
+    ).fetchall()
+    sums = {k: 0 for k in criteria_keys}
+    counts = {k: 0 for k in criteria_keys}
+    for r in rows:
+        try:
+            c = json.loads(r["criteria"]) if isinstance(r["criteria"], str) else (r["criteria"] or {})
+        except Exception:
+            continue
+        if not isinstance(c, dict):
+            continue
+        for k in criteria_keys:
+            v = c.get(k)
+            if isinstance(v, (int, float)) and 1 <= v <= 5:
+                sums[k] += v
+                counts[k] += 1
+    total = sum(1 for k in criteria_keys if counts[k])
+    return {
+        "criteria": {
+            k: (round(sums[k] / counts[k], 1) if counts[k] else None) for k in criteria_keys
+        },
+        "count": total,
+    }
 
 @app.get("/api/metricas/pesquisas")
 def get_metric_pesquisas(user=Depends(get_current_user), db=Depends(get_db)):

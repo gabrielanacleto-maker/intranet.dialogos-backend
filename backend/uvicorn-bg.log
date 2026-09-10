@@ -1,0 +1,86 @@
+DB_URL carregada: postgresql://neondb_owner:npg_...
+Banco de dados inicializado.
+INFO:     127.0.0.1:4994 - "GET /api/ranking HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:51551 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:48600 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:4228 - "GET /api/sugestoes HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:40212 - "POST /api/presence/heartbeat HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:40784 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40784 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60466 - "OPTIONS /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:19015 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:7849 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12584 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60466 - "POST /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8545 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8545 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12584 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8394 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:19015 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:7849 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60466 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2427 - "POST /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:15326 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:17670 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48882 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52005 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55793 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2427 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:9675 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62622 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20698 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59548 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12947 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5263 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49801 - "POST /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50566 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:13824 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43949 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1805 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29638 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49801 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52185 - "POST /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51546 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51546 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:27782 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42488 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:17279 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51060 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:21741 - "POST /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43093 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:19516 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63167 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62684 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:25613 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1842 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5517 - "POST /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:16208 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63251 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:27389 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50965 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42532 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47013 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61335 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:17856 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34479 - "POST /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:35041 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20903 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51060 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61335 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29325 - "GET /api/ranking HTTP/1.1" 200 OK
+INFO:     127.0.0.1:18275 - "GET /api/sugestoes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63938 - "GET /api/comunicados/unread/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50193 - "GET /api/posts/unviewed-counts?feed=feed HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4220 - "GET /api/posts/unviewed-counts?feed=internal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48594 - "GET /api/posts/unviewed-counts?feed=novidades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29325 - "POST /api/presence/heartbeat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41862 - "OPTIONS /api/cargos-gerais HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36884 - "OPTIONS /api/empresas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3753 - "OPTIONS /api/cargos-gerais HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43587 - "OPTIONS /api/empresas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34852 - "GET /api/users HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41862 - "GET /api/cargos-gerais HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36884 - "GET /api/empresas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34852 - "GET /api/users HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41862 - "GET /api/cargos-gerais HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36884 - "GET /api/empresas HTTP/1.1" 200 OK

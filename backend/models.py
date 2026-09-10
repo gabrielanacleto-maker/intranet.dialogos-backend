@@ -203,7 +203,7 @@ class AboutMeRequest(BaseModel):
     about_me: str = ""
 
 class ComportamentalRequest(BaseModel):
-    dart: str = ""
+    disc: str = ""
 
 class OrgEntry(BaseModel):
     user_key: str
