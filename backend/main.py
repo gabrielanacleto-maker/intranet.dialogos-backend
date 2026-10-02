@@ -690,6 +690,12 @@ def create_user(body: CreateUserRequest, user=Depends(require_level(2)), db=Depe
             email)
         )
         db.commit()
+        # Saldo inicial entra no ledger, senão o usuario nasce sem lastro nenhum
+        # e a auditoria nunca fecha.
+        if body.points:
+            _movimentar_dcash(db, key, body.points,
+                              f"Saldo inicial na criação por {user['name']}", "abertura")
+            db.commit()
         log_action(db, user["key"], key, "Criação de Usuário", f"Criou usuário {body.name}")
         _notify(db, title="👤 Novo colaborador",
                 message=f"{user['name']} criou o usuário {body.name} ({body.role})",
@@ -764,8 +770,12 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
                 raise HTTPException(status_code=400, detail="Senioridade inválida para esta empresa.")
         role_final = (body.role or "").strip() or cargo_nome or (target.get("role") or "")
         dept_final = (body.dept or "").strip() or dept_nome or (target.get("dept") or "")
+        # points NAO entra neste UPDATE de propósito: o formulário de perfil
+        # reenvia o valor em cache (ProfilePage.jsx), então salvar o perfil
+        # apagaria D-Cash ganho depois que a tela foi aberta. Alterar saldo é
+        # só por PUT /api/users/{key}/points, que passa pelo ledger.
         set_clause = """UPDATE users SET name=%s, initials=%s, role=%s, dept=%s, level=%s,
-            color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, nivel_dourado=%s, points=%s,
+            color=%s, access_level=%s, is_admin=%s, is_admin_user=%s, is_rh=%s, is_ouvidor=%s, is_diretor=%s, is_leader=%s, nivel_dourado=%s,
             hire_date=%s, org_position=%s, is_orcoma=%s"""
         params = [body.name, body.initials, role_final, dept_final, body.level,
             body.color, body.access_level,
@@ -773,7 +783,6 @@ def update_user(target_key: str, body: UpdateUserRequest, user=Depends(get_curre
             1 if body.is_rh else 0, 1 if body.is_ouvidor else 0,
             1 if body.is_diretor else 0, 1 if body.is_leader else 0,
             1 if body.nivel_dourado else 0,
-            body.points,
             body.hire_date or "", body.org_position or 'colaborador', 1 if body.is_orcoma else 0]
         if body.cargo_id is not None:
             set_clause += ", cargo_id=%s"
@@ -2574,9 +2583,8 @@ def create_evaluation(body: dict, user=Depends(get_current_user), db=Depends(get
         log_audit(db, user["key"], "evaluation_create", employee_id, f"Tipo: {evaluation_type}")
 
     if score_delta != 0:
-        current_points = target["points"] or 0
-        new_points = max(0, current_points + score_delta)
-        db.execute("UPDATE users SET points=%s WHERE key=%s", (new_points, employee_id))
+        _movimentar_dcash(db, employee_id, score_delta,
+                          f"Avaliação ({evaluation_type})", "avaliacao", ref_id=eid)
 
     _notify(db, title="📋 Avaliação recebida",
             message=f"Sua avaliação ({evaluation_type}) foi registrada por {user['name']}",
@@ -2785,9 +2793,23 @@ def presence_heartbeat(user=Depends(get_current_user), db=Depends(get_db)):
     else:
         db.execute("INSERT INTO presence (user_key, is_online, last_seen, last_activity) VALUES (%s,1,%s,%s)",
                    (user["key"], now, now))
+
+    # Login diário: o App.jsx chama este endpoint ao abrir e depois a cada 60s.
+    # A trava em daily_rewards (PK user_key+dia+reward_key) faz o prêmio valer
+    # só no primeiro heartbeat do dia; os seguintes não geram nada.
+    premio = _premiar_dcash_diario(
+        db, user, REWARD_KEY_LOGIN, DCOINS_LOGIN_DIARIO,
+        reason="Login diário: Faça login",
+        title=f"💰 +{DCOINS_LOGIN_DIARIO} D-Cash",
+        message=f"Você ganhou {DCOINS_LOGIN_DIARIO} D-Cash pelo login de hoje!",
+    )
+
     db.commit()
+    # Só depois do commit: emitir antes avisaria o cliente de um saldo que
+    # ainda pode ser revertido.
+    _emitir_dcash_atualizado(user["key"], premio)
     ws_emit("user_online", {"user_key": user["key"], "last_activity": now})
-    return {"ok": True}
+    return {"ok": True, "points": premio["saldo"]} if premio else {"ok": True}
 
 @app.post("/api/presence/logout")
 def presence_logout(user=Depends(get_current_user), db=Depends(get_db)):
@@ -3495,7 +3517,11 @@ def update_points(target_key: str, body: PointsRequest, user=Depends(require_lev
     target = db.execute("SELECT name, points FROM users WHERE key=%s", (target_key,)).fetchone()
     old_points = target["points"] or 0
     new_points = body.points
-    db.execute("UPDATE users SET points=%s WHERE key=%s", (new_points, target_key))
+    # O admin define o valor final; o ledger guarda a diferença para que o
+    # saldo continue reconstituível a partir do histórico.
+    mov = _movimentar_dcash(db, target_key, new_points - old_points,
+                            f"Ajuste manual por {user['name']}: {old_points} → {new_points}",
+                            "ajuste_admin")
     log_audit(db, user["key"], "points_update", target_key,
               f"Pontos alterados: {old_points} → {new_points} (por {user['name']})")
     _notify(db, title="📊 Pontos atualizados",
@@ -3505,6 +3531,8 @@ def update_points(target_key: str, body: PointsRequest, user=Depends(require_lev
             play_sound=True)
     db.commit()
     _invalidate_user_cache(target_key)
+    if mov and mov[0] != 0:
+        _emitir_dcash_atualizado(target_key, {"delta": mov[0], "saldo": mov[1]})
     return {"ok": True}
 
 
@@ -3533,35 +3561,18 @@ def save_organogram(entries: list[OrgEntry], user=Depends(require_level(2)), db=
 MOOD_VALUES = {1: "muito_triste", 2: "triste", 3: "neutro", 4: "feliz", 5: "muito_feliz"}
 MOOD_EMOJIS = {1: "\U0001F61E", 2: "\U0001F641", 3: "\U0001F610", 4: "\U0001F642", 5: "\U0001F604"}
 
-_mood_rate = {}
-
 _BRT = datetime.timezone(datetime.timedelta(hours=-3))
 
-def _mood_today_record(db, user_key):
-    """Retorna o registro de humor do usuário caso já tenha avaliado hoje (fuso BRT)."""
-    try:
-        row = db.execute(
-            "SELECT mood, created_at FROM mood_history WHERE user_key=%s ORDER BY created_at DESC LIMIT 1",
-            (user_key,)
-        ).fetchone()
-        if not row or not row["created_at"]:
-            return None
-        dt = datetime.datetime.fromisoformat(str(row["created_at"]))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        if dt.astimezone(_BRT).date() == datetime.datetime.now(_BRT).date():
-            return row
-    except (ValueError, TypeError):
-        return None
-    return None
+def _hoje_brt():
+    """Data de hoje no fuso de Brasília, usada como chave da trava diária."""
+    return datetime.datetime.now(_BRT).date()
 
-def _check_mood_rate_limit(user_key: str):
-    hoje = datetime.date.today().isoformat()
-    key = f"mood:{user_key}:{hoje}"
-    count = _mood_rate.get(key, 0)
-    if count >= 1:
-        raise HTTPException(status_code=429, detail="Você já registrou seu humor hoje. Volte amanhã!")
-    _mood_rate[key] = count + 1
+def _mood_today_record(db, user_key):
+    """Registro de humor de hoje (fuso BRT), via trava PK de mood_daily_lock."""
+    return db.execute(
+        "SELECT mood, mood_id, created_at FROM mood_daily_lock WHERE user_key=%s AND dia_brt=%s",
+        (user_key, _hoje_brt())
+    ).fetchone()
 
 @app.post("/api/mood")
 def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user), db=Depends(get_db)):
@@ -3577,15 +3588,25 @@ def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user
     if _mood_today_record(db, user["key"]):
         raise HTTPException(status_code=429, detail="Você já registrou seu humor hoje. Volte amanhã!")
 
-    _check_mood_rate_limit(user["key"])
-
     intensity = body.intensity if body.intensity else None
+    mood_id = str(uuid.uuid4())
+
+    # Trava atômica: a PK (user_key, dia_brt) aceita no máximo uma linha por dia.
+    # Duas requisições simultâneas disputam o mesmo INSERT — só uma vence.
+    db.execute("""INSERT INTO mood_daily_lock (user_key, dia_brt, mood, mood_id, created_at)
+        VALUES (%s,%s,%s,%s,%s) ON CONFLICT (user_key, dia_brt) DO NOTHING""",
+        (user["key"], _hoje_brt(), mood_key, mood_id, datetime.datetime.utcnow().isoformat())
+    )
+    if db.rowcount == 0:
+        db.rollback()
+        raise HTTPException(status_code=429, detail="Você já registrou seu humor hoje. Volte amanhã!")
 
     db.execute("""INSERT INTO mood_history (id, user_key, mood, intensity, reason, created_at)
         VALUES (%s,%s,%s,%s,%s,%s)""",
-        (str(uuid.uuid4()), user["key"], mood_key, intensity, body.reason or "",
-        datetime.datetime.utcnow().isoformat())
+        (mood_id, user["key"], mood_key, intensity, body.reason or "",
+         datetime.datetime.utcnow().isoformat())
     )
+
 
     _log_atividade(db, "humor", user["key"],
                    f"{user['name']} respondeu o Termômetro do Humor")
@@ -3602,6 +3623,25 @@ def save_mood(body: MoodRequest, request: Request, user=Depends(get_current_user
     log_action(db, user["key"], user["key"], "Registro de Humor",
                f"valor_humor={body.valor_humor or mood_key} IP={ip}")
 
+    # Recompensa diária por responder o termômetro, no mesmo valor e com o mesmo
+    # motivo que o objetivo "Avalie seu humor!" usava antes do módulo de
+    # objetivos sumir do backend. A trava fica em daily_rewards (reward_key
+    # humor_diario), separada da trava da resposta — então um reset do humor
+    # libera a nova resposta mas NÃO paga D-Cash de novo.
+    # Roda depois do commit da resposta: falha aqui não pode impedir o voto.
+    try:
+        premio = _premiar_dcash_diario(
+            db, user, REWARD_KEY_HUMOR, DCOINS_HUMOR_DIARIO,
+            reason="Humor registrado: Avalie seu humor!",
+            title=f"💰 +{DCOINS_HUMOR_DIARIO} D-Cash",
+            message=f"Você ganhou {DCOINS_HUMOR_DIARIO} D-Cash por registrar seu humor de hoje!",
+        )
+        db.commit()
+        _emitir_dcash_atualizado(user["key"], premio)
+    except Exception:
+        db.rollback()
+        print(f"[aviso] falha ao premiar D-Cash de humor para {user['key']}")
+
 
     return {"ok": True, "valor_humor": body.valor_humor or None}
 
@@ -3617,13 +3657,25 @@ def get_mood_status(user=Depends(get_current_user), db=Depends(get_db)):
     valor = None
     if rec:
         valor = {v: k for k, v in MOOD_VALUES.items()}.get(rec["mood"])
-    return {"registered_today": bool(rec), "valor_humor": valor}
+    # O valor vai no response para o widget mostrar o número real em vez de um
+    # texto fixo no front — as duas pontas do prêmio não podem divergir.
+    return {"registered_today": bool(rec), "valor_humor": valor,
+            "reward_dcash": DCOINS_HUMOR_DIARIO}
 
 @app.post("/api/mood/reset")
-def reset_mood(user=Depends(get_current_user), db=Depends(get_db)):
-    db.execute("DELETE FROM mood_history WHERE user_key=%s", (user["key"],))
+def reset_mood(user=Depends(require_level(2)), db=Depends(get_db)):
+    """Libera a resposta de HUMOR DE HOJE. O histórico não é apagado."""
+    hoje = _hoje_brt()
+    rec = _mood_today_record(db, user["key"])
+    if not rec:
+        return {"ok": True, "removido": False}
+
+    db.execute("DELETE FROM mood_history WHERE id=%s", (rec["mood_id"],))
+    db.execute("DELETE FROM mood_daily_lock WHERE user_key=%s AND dia_brt=%s", (user["key"], hoje))
+    log_action(db, user["key"], user["key"], "Reset humor do dia",
+               f"dia={hoje} humor={rec['mood']} mood_id={rec['mood_id']}")
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "removido": True, "dia": str(hoje)}
 
 
 # ── RELATÓRIO DE HUMOR ────────────────────────────────────────────────────────
@@ -4313,6 +4365,141 @@ def delete_calendar_event(event_id: str, user=Depends(get_current_user), db=Depe
     return {"ok": True}
 # ── GAMIFICAÇÃO (PONTOS, BADGES, LEADERBOARD) ──────────────────────────────
 
+# Valor do login diário. Mesma recompensa que o objetivo "Faça login" já tem em
+# objetivos_def (recompensa_dcoins = 10). Ficou paradoxicalmente sem efeito desde
+# 03/08/2026 porque o módulo de objetivos não existe mais neste backend.
+DCOINS_LOGIN_DIARIO = 10
+REWARD_KEY_LOGIN = "login_diario"
+
+# Valor da resposta do termômetro de humor. Mesmo valor e mesmo motivo que o
+# objetivo "Avalie seu humor!" usava (objetivos_def.recompensa_dcoins = 10, e os
+# 27 lançamentos históricos de humor no ledger somam 270 = 10 cada).
+# Atenção: o ribbon do MoodWidget.jsx anuncia "50 D´coins" — inconsistência de
+# UI pré-existente, não ajustada aqui.
+DCOINS_HUMOR_DIARIO = 10
+REWARD_KEY_HUMOR = "humor_diario"
+
+
+def _movimentar_dcash(db, user_key, delta, reason, action_type, ref_id=None, ledger_id=None):
+    """Único ponto onde o saldo de D-Cash muda. Registra no ledger sempre.
+
+    delta > 0 credito, delta < 0 debito. O saldo nunca fica negativo: se o debito
+    for maior que o saldo, o debito efetivo é truncado e o lançamento registra o
+    que foi realmente aplicado — assim SUM(user_points.points) continua batendo
+    com users.points.
+
+    Faz o UPDATE com CTE num statement só, então dois créditos simultâneos não se
+    sobrescrevem (o antigo padrão read-then-write perdia um deles). Não faz
+    commit: quem chama controla a transação.
+
+    Retorna (delta_efetivo, saldo_apos) ou None se o usuário não existir.
+    """
+    row = db.execute("""
+        WITH anterior AS (
+            SELECT COALESCE(points, 0) AS p FROM users WHERE key = %s
+        ), aplicado AS (
+            UPDATE users u
+               SET points = GREATEST(0, COALESCE(u.points, 0) + %s)
+             WHERE u.key = %s
+         RETURNING u.points AS p
+        )
+        SELECT (SELECT p FROM anterior) AS saldo_ant,
+               (SELECT p FROM aplicado) AS saldo_novo
+    """, (user_key, delta, user_key)).fetchone()
+    if row is None or row["saldo_novo"] is None:
+        return None
+
+    delta_efetivo = row["saldo_novo"] - row["saldo_ant"]
+    if delta_efetivo == 0:
+        # Nada mudou (ex.: debito maior que o saldo, em um usuario zerado).
+        # Não grava lançamento fantasma.
+        return (0, row["saldo_novo"])
+
+    db.execute("""INSERT INTO user_points
+        (id, user_key, points, reason, action_type, created_at, saldo_apos)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+        (ledger_id or str(uuid.uuid4()), user_key, delta_efetivo, reason, action_type,
+         datetime.datetime.utcnow().isoformat(), row["saldo_novo"])
+    )
+    return (delta_efetivo, row["saldo_novo"])
+
+
+def _registrar_abertura_dcash(db, user_key, diferenca, reason):
+    """Grava a divergência no ledger SEM tocar no saldo.
+
+    Diferente de _movimentar_dcash de propósito: a apuração documenta uma
+    diferença que já existe, não cria D-Cash novo. Passar a diferença como delta
+    passaria pelo GREATEST(0, ...) e zeraria o saldo de quem já gastou mais do
+    que ganhou — o ledger estava certo, o dinheiro sumia.
+    """
+    saldo = db.execute("SELECT COALESCE(points, 0) AS p FROM users WHERE key=%s",
+                       (user_key,)).fetchone()["p"]
+    db.execute("""INSERT INTO user_points
+        (id, user_key, points, reason, action_type, created_at, saldo_apos)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+        (str(uuid.uuid4()), user_key, diferenca, reason, "abertura",
+         datetime.datetime.utcnow().isoformat(), saldo)
+    )
+    return saldo
+
+
+def _premiar_dcash_diario(db, user, reward_key, points, reason, title, message):
+    """Concede D-Cash uma vez por usuário/dia.
+
+    Atômico: a PK (user_key, dia_brt, reward_key) de daily_rewards faz o INSERT
+    falhar silenciosamente quando o prêmio do dia já foi dado, então heartbeat
+    repetido a cada 60s não duplica. Não faz commit — quem chama controla a
+    transação.
+
+    Retorna {"delta", "saldo"} quando o prêmio saiu, ou None quando não saiu
+    (já recebido hoje, ou nada aplicado). Quem chama emite o socket DEPOIS do
+    commit, usando esse retorno.
+    """
+    hoje = _hoje_brt()
+    now = datetime.datetime.utcnow().isoformat()
+    ledger_id = str(uuid.uuid4())
+
+    db.execute("""INSERT INTO daily_rewards
+        (user_key, dia_brt, reward_key, points, ledger_id, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (user_key, dia_brt, reward_key) DO NOTHING""",
+        (user["key"], hoje, reward_key, points, ledger_id, now)
+    )
+    if db.rowcount == 0:
+        return None
+
+    # Ledger e saldo pelo funil único de D-Cash.
+    mov = _movimentar_dcash(db, user["key"], points, reason, reward_key,
+                             ref_id=ledger_id, ledger_id=ledger_id)
+    if mov is None or mov[0] == 0:
+        db.rollback()
+        return None
+
+    _notify(db, title=title, message=message, ntype="dcash",
+            target_user_key=user["key"], play_sound=True,
+            sender_name="Sistema", reference_id=ledger_id)
+
+    _invalidate_user_cache(user["key"])
+    return {"delta": mov[0], "saldo": mov[1]}
+
+
+def _emitir_dcash_atualizado(user_key, premio):
+    """Avisa a UI que o saldo mudou. Chamar SÓ depois do commit.
+
+    Dois eventos porque são consumidores diferentes:
+      - dcash_atualizado -> só o dono do saldo, para atualizar o objeto do usuário
+      - ranking_updated  -> todos, porque o ranking de qualquer um mudou
+    """
+    if not premio:
+        return
+    ws_emit_to_user(user_key, "dcash_atualizado", {
+        "user_key": user_key,
+        "delta": premio["delta"],
+        "points": premio["saldo"],
+    })
+    ws_emit("ranking_updated", {"user_key": user_key}, rooms=["all"])
+
+
 @app.post("/api/gamificacao/add-points")
 def add_points(user_key: str, points: int, reason: str, action_type: str, user=Depends(require_level(2)), db=Depends(get_db)):
     """Admin adiciona pontos a um usuário"""
@@ -4320,17 +4507,13 @@ def add_points(user_key: str, points: int, reason: str, action_type: str, user=D
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-    # Adicionar ponto à tabela user_points
+    # Ledger + saldo pelo funil único de D-Cash (UPDATE atômico, sem read-then-write).
     point_id = str(uuid.uuid4())
-    db.execute("""INSERT INTO user_points (id, user_key, points, reason, action_type, created_at)
-        VALUES (%s,%s,%s,%s,%s,%s)""",
-        (point_id, user_key, points, reason, action_type, datetime.datetime.utcnow().isoformat())
-    )
-
-    # Atualizar pontos totais do usuário
-    current_points = target["points"] or 0
-    new_total = current_points + points
-    db.execute("UPDATE users SET points=%s WHERE key=%s", (new_total, user_key))
+    mov = _movimentar_dcash(db, user_key, points, reason,
+                            action_type or "admin", ref_id=point_id, ledger_id=point_id)
+    if mov is None:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    new_total = mov[1]
 
     _notify(db, title="💰 Pontos recebidos",
             message=f"Você recebeu {points} pontos por: {reason}",
@@ -4338,7 +4521,9 @@ def add_points(user_key: str, points: int, reason: str, action_type: str, user=D
             sender_key=user["key"], sender_name=user["name"],
             reference_id=point_id, play_sound=True)
     db.commit()
-    return {"ok": True, "new_total": new_total, "points_added": points}
+    if mov[0] != 0:
+        _emitir_dcash_atualizado(user_key, {"delta": mov[0], "saldo": new_total})
+    return {"ok": True, "new_total": new_total, "points_added": mov[0]}
 
 @app.get("/api/gamificacao/user-points/{user_key}")
 def get_user_points(user_key: str, user=Depends(get_current_user), db=Depends(get_db)):
@@ -4357,6 +4542,91 @@ def get_user_points(user_key: str, user=Depends(get_current_user), db=Depends(ge
         "total_points": target["points"] or 0,
         "history": [dict(h) for h in history]
     }
+
+@app.post("/api/gamificacao/dcash/ancorar")
+def ancorar_saldos_dcash(user=Depends(require_level(3)), db=Depends(get_db)):
+    """Registra no ledger o saldo atual de cada usuário como ponto de partida.
+
+    Antes disso o ledger só registrava créditos, e os débitos (D-Cash gasto em
+    recompensas) nunca ficaram registrados — então a soma do histórico não
+    batia com o saldo de 6 dos 15 usuários. Este endpoint NÃO inventa o passado:
+    ele ancora no saldo real de hoje, a partir de agora o histórico fecha.
+
+    Idempotente: pula quem já tem um lançamento do tipo 'abertura'.
+    """
+    rows = db.execute("SELECT key, name, points FROM users ORDER BY key").fetchall()
+    ancorados, pulados, ja_conferem = 0, 0, 0
+    for r in rows:
+        tem_abertura = db.execute(
+            "SELECT 1 FROM user_points WHERE user_key=%s AND action_type='abertura' LIMIT 1",
+            (r["key"],)
+        ).fetchone()
+        if tem_abertura:
+            pulados += 1
+            continue
+        saldo = r["points"] or 0
+        # O lançamento de abertura registra a DIFERENÇA, não o saldo.
+        # Somar o saldo inteiro ao saldo mudaria o dinheiro de quem já tem
+        # histórico — a abertura tem que documentar a lacuna, não criá-la.
+        soma = db.execute(
+            "SELECT COALESCE(SUM(points), 0) AS s FROM user_points WHERE user_key=%s",
+            (r["key"],)
+        ).fetchone()["s"]
+        diferenca = saldo - soma
+        if diferenca == 0:
+            ja_conferem += 1
+            continue
+        _registrar_abertura_dcash(db, r["key"], diferenca,
+                                  "Apuração do saldo em %s: %d no histórico, %d no saldo"
+                                  % (_hoje_brt().isoformat(), soma, saldo))
+        ancorados += 1
+    db.commit()
+    return {
+        "ok": True,
+        "ancorados": ancorados,
+        "ja_ancorados": pulados,
+        "ja_conferiam": ja_conferem,
+        "total_usuarios": len(rows),
+    }
+
+
+@app.get("/api/gamificacao/dcash/auditoria")
+def auditar_dcash(user=Depends(require_level(2)), db=Depends(get_db)):
+    """Confere se o saldo de cada usuário é reconstituível a partir do ledger.
+
+    saldo == SUM(user_points.points) para todo mundo significa que nenhum
+    D-Cash entrou ou saiu sem registro.
+    """
+    rows = db.execute("""
+        SELECT u.key, u.name, COALESCE(u.points, 0) AS saldo,
+               COALESCE(SUM(up.points), 0) AS ledger,
+               COUNT(up.id) AS lancamentos
+        FROM users u
+        LEFT JOIN user_points up ON up.user_key = u.key
+        GROUP BY u.key, u.name, u.points
+        ORDER BY u.key
+    """).fetchall()
+
+    itens, divergentes = [], 0
+    for r in rows:
+        dif = r["saldo"] - r["ledger"]
+        if dif != 0:
+            divergentes += 1
+        itens.append({
+            "key": r["key"], "name": r["name"],
+            "saldo": r["saldo"], "ledger": r["ledger"],
+            "lancamentos": r["lancamentos"], "divergencia": dif,
+            "confere": dif == 0,
+        })
+
+    return {
+        "ok": divergentes == 0,
+        "total_usuarios": len(itens),
+        "divergentes": divergentes,
+        "total_divergencia": sum(i["divergencia"] for i in itens),
+        "itens": itens,
+    }
+
 
 @app.post("/api/gamificacao/award-badge")
 def award_badge(user_key: str, badge_type: str, badge_name: str, description: str, icon: str,
@@ -4708,11 +4978,13 @@ def create_feedback(body: FeedbackRequest, user=Depends(get_current_user), db=De
         safe_sector, safe_text, body.rating, body.action, body.points, now)
     )
 
-    # Update XP
-    current_xp = target["points"] or 0
+    # Update XP pelo funil de D-Cash (o GREATEST(0,...) evita saldo negativo).
     delta = body.points if body.action == "add" else -body.points
-    new_xp = max(0, current_xp + delta)
-    db.execute("UPDATE users SET points=%s WHERE key=%s", (new_xp, body.target_user_key))
+    _movimentar_dcash(db, body.target_user_key, delta,
+                      f"Feedback ({body.rating}/10) por {user['name']}",
+                      "feedback", ref_id=fid)
+    new_xp = db.execute("SELECT COALESCE(points,0) p FROM users WHERE key=%s",
+                        (body.target_user_key,)).fetchone()["p"]
 
     # Audit log
     db.execute(

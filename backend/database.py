@@ -2,6 +2,7 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 import os
+import threading
 import uuid
 import datetime
 
@@ -42,6 +43,10 @@ class SmartCursor:
 
 
 _pool = None
+# Sem este lock, duas threads simultâneas no primeiro acesso criavam dois pools: o
+# getconn vinha de um e o putconn de outro, quebrando com
+# "PoolError: trying to put unkeyed connection".
+_pool_lock = threading.Lock()
 _DB_POOL_MIN = max(int(os.getenv("DB_POOL_MIN", "1")), 1)
 _DB_POOL_MAX = max(int(os.getenv("DB_POOL_MAX", "20")), _DB_POOL_MIN)
 
@@ -49,17 +54,20 @@ _DB_POOL_MAX = max(int(os.getenv("DB_POOL_MAX", "20")), _DB_POOL_MIN)
 def _get_pool():
     global _pool
     if _pool is None:
-        _pool = psycopg2.pool.ThreadedConnectionPool(
-            _DB_POOL_MIN, _DB_POOL_MAX, DB_URL
-        )
+        with _pool_lock:
+            if _pool is None:
+                _pool = psycopg2.pool.ThreadedConnectionPool(
+                    _DB_POOL_MIN, _DB_POOL_MAX, DB_URL
+                )
     return _pool
 
 
 def close_pool():
     global _pool
-    if _pool is not None:
-        _pool.closeall()
-        _pool = None
+    with _pool_lock:
+        if _pool is not None:
+            _pool.closeall()
+            _pool = None
 
 
 @contextmanager
@@ -332,6 +340,56 @@ def init_db():
                 UNIQUE(user_key, post_id)
             )
         """)
+
+        # Trava de "1 resposta de humor por dia".
+        # A PK (user_key, dia_brt) garante no banco o que antes era só uma
+        # checagem em Python — imune a requisição simultânea e a múltiplos workers.
+        # Tabela nova: não altera nem apaga o histórico já existente em mood_history.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS mood_daily_lock (
+                user_key TEXT NOT NULL,
+                dia_brt DATE NOT NULL,
+                mood TEXT NOT NULL,
+                mood_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (user_key, dia_brt)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_mood_daily_lock_dia ON mood_daily_lock(dia_brt)")
+
+        # Ledger de D-Cash: todo crédito de pontos precisa deixar registro aqui.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_points (
+                id TEXT PRIMARY KEY,
+                user_key TEXT NOT NULL,
+                points INTEGER DEFAULT 0,
+                reason TEXT DEFAULT '',
+                action_type TEXT DEFAULT '',
+                created_at TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_user_points_user ON user_points(user_key, created_at DESC)")
+        # Snapshot do saldo depois de cada lançamento. Com points assinado
+        # (+ credito / - debito) e este campo, a cadeia do saldo é auditável:
+        # SUM(points) tem que bater com users.points.
+        _safe_add_column(c, "user_points", "saldo_apos", "saldo_apos INTEGER")
+
+        # Recompensas diárias de D-Cash.
+        # A PK (user_key, dia_brt, reward_key) garante UMA concessão por dia e por
+        # tipo de prêmio, mesmo com heartbeat a cada 60s ou múltiplos workers.
+        # ledger_id liga cada prêmio ao seu lançamento em user_points.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS daily_rewards (
+                user_key TEXT NOT NULL,
+                dia_brt DATE NOT NULL,
+                reward_key TEXT NOT NULL,
+                points INTEGER NOT NULL,
+                ledger_id TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (user_key, dia_brt, reward_key)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_daily_rewards_dia ON daily_rewards(dia_brt)")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS evaluations (
