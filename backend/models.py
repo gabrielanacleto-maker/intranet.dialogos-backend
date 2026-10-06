@@ -224,7 +224,24 @@ class PriceProcedureRequest(BaseModel):
     name: str
     value_cash: Optional[float] = 0
     value_card_pix: Optional[float] = 0
-    value_bradesco: Optional[float] = 0
+    value_bradesco: Optional[str] = ''
+    position_order: Optional[int] = 0
+
+class AtendimentoBradescoRequest(BaseModel):
+    especialidades_liberadas: str
+    guias: Optional[str] = ''
+    desconto_bradesco: Optional[float] = 0
+    desconto_bradesco_pct: Optional[bool] = False
+    valor_profissional: Optional[float] = 0
+    position_order: Optional[int] = 0
+
+class BrvDescontoRequest(BaseModel):
+    procedimento: str
+    desconto_brv: Optional[float] = 0
+    desconto_brv_pct: Optional[bool] = False
+    desconto_bradesco: Optional[float] = 0
+    desconto_bradesco_pct: Optional[bool] = False
+    valor_profissional: Optional[float] = 0
     position_order: Optional[int] = 0
 
 class CalendarEventRequest(BaseModel):

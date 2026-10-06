@@ -4025,7 +4025,7 @@ def create_price_procedure(body: PriceProcedureRequest, user=Depends(require_lev
         (id, doctor_id, name, value_cash, value_card_pix, value_bradesco, position_order, created_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
         (proc_id, body.doctor_id, body.name, body.value_cash or 0, body.value_card_pix or 0,
-        body.value_bradesco or 0,
+        body.value_bradesco or "",
         body.position_order, datetime.datetime.utcnow().isoformat())
     )
     db.commit()
@@ -4035,7 +4035,7 @@ def create_price_procedure(body: PriceProcedureRequest, user=Depends(require_lev
 def update_price_procedure(proc_id: str, body: PriceProcedureRequest, user=Depends(require_level(1)), db=Depends(get_db)):
     db.execute("""UPDATE price_procedures SET name=%s, value_cash=%s, value_card_pix=%s, value_bradesco=%s,
         position_order=%s WHERE id=%s""",
-        (body.name, body.value_cash or 0, body.value_card_pix or 0, body.value_bradesco or 0,
+        (body.name, body.value_cash or 0, body.value_card_pix or 0, body.value_bradesco or "",
         body.position_order, proc_id)
     )
     db.commit()
@@ -4044,6 +4044,141 @@ def update_price_procedure(proc_id: str, body: PriceProcedureRequest, user=Depen
 @app.delete("/api/price-procedures/{proc_id}")
 def delete_price_procedure(proc_id: str, user=Depends(require_level(1)), db=Depends(get_db)):
     db.execute("DELETE FROM price_procedures WHERE id=%s", (proc_id,))
+    db.commit()
+    return {"ok": True}
+
+# ── DESCONTOS BRV ─────────────────────────────────────────────────────────────
+
+@app.get("/api/brv-descontos")
+def get_brv_descontos(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""SELECT * FROM brv_descontos
+        ORDER BY position_order ASC, procedimento ASC""").fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/brv-descontos")
+def create_brv_desconto(body: BrvDescontoRequest, user=Depends(require_level(1)), db=Depends(get_db)):
+    procedimento = (body.procedimento or "").strip()
+    if not procedimento:
+        raise HTTPException(status_code=422, detail="Informe o procedimento.")
+
+    dup = db.execute("""SELECT id FROM brv_descontos
+        WHERE LOWER(TRIM(procedimento)) = LOWER(%s)""", (procedimento,)).fetchone()
+    if dup:
+        raise HTTPException(status_code=409, detail="Já existe um desconto com esse procedimento.")
+
+    if body.position_order is None:
+        last = db.execute("SELECT COALESCE(MAX(position_order), 0) AS m FROM brv_descontos").fetchone()
+        position_order = int(last["m"]) + 1
+    else:
+        position_order = body.position_order
+
+    desconto_id = str(uuid.uuid4())
+    db.execute("""INSERT INTO brv_descontos
+        (id, procedimento, desconto_brv, desconto_brv_pct, desconto_bradesco,
+         desconto_bradesco_pct, valor_profissional, position_order, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (desconto_id, procedimento, body.desconto_brv or 0, bool(body.desconto_brv_pct),
+        body.desconto_bradesco or 0, bool(body.desconto_bradesco_pct),
+        body.valor_profissional or 0, position_order, datetime.datetime.utcnow().isoformat())
+    )
+    db.commit()
+    return {"ok": True, "id": desconto_id}
+
+@app.put("/api/brv-descontos/{desconto_id}")
+def update_brv_desconto(desconto_id: str, body: BrvDescontoRequest,
+                         user=Depends(require_level(1)), db=Depends(get_db)):
+    procedimento = (body.procedimento or "").strip()
+    if not procedimento:
+        raise HTTPException(status_code=422, detail="Informe o procedimento.")
+
+    dup = db.execute("""SELECT id FROM brv_descontos
+        WHERE LOWER(TRIM(procedimento)) = LOWER(%s) AND id <> %s""",
+        (procedimento, desconto_id)).fetchone()
+    if dup:
+        raise HTTPException(status_code=409, detail="Já existe um desconto com esse procedimento.")
+
+    db.execute("""UPDATE brv_descontos SET procedimento=%s, desconto_brv=%s, desconto_brv_pct=%s,
+        desconto_bradesco=%s, desconto_bradesco_pct=%s, valor_profissional=%s, updated_at=%s
+        WHERE id=%s""",
+        (procedimento, body.desconto_brv or 0, bool(body.desconto_brv_pct),
+        body.desconto_bradesco or 0, bool(body.desconto_bradesco_pct),
+        body.valor_profissional or 0, datetime.datetime.utcnow().isoformat(), desconto_id)
+    )
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/brv-descontos/{desconto_id}")
+def delete_brv_desconto(desconto_id: str, user=Depends(require_level(1)), db=Depends(get_db)):
+    db.execute("DELETE FROM brv_descontos WHERE id=%s", (desconto_id,))
+    db.commit()
+    return {"ok": True}
+
+# ── ATENDIMENTOS E DESCONTOS BRADESCOS ──────────────────────────────────────────
+
+@app.get("/api/atendimentos-bradesco")
+def get_atendimentos_bradesco(user=Depends(get_current_user), db=Depends(get_db)):
+    rows = db.execute("""SELECT * FROM atendimentos_bradesco
+        ORDER BY position_order ASC, especialidades_liberadas ASC""").fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/atendimentos-bradesco")
+def create_atendimento_bradesco(body: AtendimentoBradescoRequest,
+                               user=Depends(require_level(1)), db=Depends(get_db)):
+    especialidades = (body.especialidades_liberadas or "").strip()
+    if not especialidades:
+        raise HTTPException(status_code=422, detail="Informe as especialidades liberadas.")
+
+    dup = db.execute("""SELECT id FROM atendimentos_bradesco
+        WHERE LOWER(TRIM(especialidades_liberadas)) = LOWER(%s)""", (especialidades,)).fetchone()
+    if dup:
+        raise HTTPException(status_code=409,
+                            detail="Já existe um registro com essas especialidades liberadas.")
+
+    last = db.execute("SELECT COALESCE(MAX(position_order), 0) AS m FROM atendimentos_bradesco").fetchone()
+    position_order = int(last["m"]) + 1
+
+    atendimento_id = str(uuid.uuid4())
+    db.execute("""INSERT INTO atendimentos_bradesco
+        (id, especialidades_liberadas, guias, desconto_bradesco, desconto_bradesco_pct,
+         valor_profissional, position_order, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (atendimento_id, especialidades, str(body.guias or "").strip(),
+         body.desconto_bradesco or 0, bool(body.desconto_bradesco_pct),
+         body.valor_profissional or 0,
+         position_order, datetime.datetime.utcnow().isoformat())
+    )
+    db.commit()
+    return {"ok": True, "id": atendimento_id}
+
+@app.put("/api/atendimentos-bradesco/{atendimento_id}")
+def update_atendimento_bradesco(atendimento_id: str, body: AtendimentoBradescoRequest,
+                               user=Depends(require_level(1)), db=Depends(get_db)):
+    especialidades = (body.especialidades_liberadas or "").strip()
+    if not especialidades:
+        raise HTTPException(status_code=422, detail="Informe as especialidades liberadas.")
+
+    dup = db.execute("""SELECT id FROM atendimentos_bradesco
+        WHERE LOWER(TRIM(especialidades_liberadas)) = LOWER(%s) AND id <> %s""",
+        (especialidades, atendimento_id)).fetchone()
+    if dup:
+        raise HTTPException(status_code=409,
+                            detail="Já existe um registro com essas especialidades liberadas.")
+
+    db.execute("""UPDATE atendimentos_bradesco
+        SET especialidades_liberadas=%s, guias=%s, desconto_bradesco=%s,
+            desconto_bradesco_pct=%s, valor_profissional=%s, updated_at=%s
+        WHERE id=%s""",
+        (especialidades, str(body.guias or "").strip(), body.desconto_bradesco or 0,
+         bool(body.desconto_bradesco_pct),
+         body.valor_profissional or 0, datetime.datetime.utcnow().isoformat(), atendimento_id)
+    )
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/atendimentos-bradesco/{atendimento_id}")
+def delete_atendimento_bradesco(atendimento_id: str,
+                                user=Depends(require_level(1)), db=Depends(get_db)):
+    db.execute("DELETE FROM atendimentos_bradesco WHERE id=%s", (atendimento_id,))
     db.commit()
     return {"ok": True}
 

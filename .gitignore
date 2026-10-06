@@ -1,3 +1,7 @@
 backend/__pycache__/
 backend/.env
 frontend/
+
+*.log
+.opencode/
+.kilo/

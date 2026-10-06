@@ -451,6 +451,48 @@ def init_db():
         """)
 
         c.execute("""
+            CREATE TABLE IF NOT EXISTS brv_descontos (
+                id TEXT PRIMARY KEY,
+                procedimento TEXT NOT NULL,
+                desconto_brv NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                desconto_brv_pct BOOLEAN NOT NULL DEFAULT FALSE,
+                desconto_bradesco NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                desconto_bradesco_pct BOOLEAN NOT NULL DEFAULT FALSE,
+                valor_profissional NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                position_order INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT
+            )
+        """)
+        # Migração: tabela criada antes das colunas de unidade (_pct) existirem
+        c.execute("ALTER TABLE brv_descontos ADD COLUMN IF NOT EXISTS desconto_brv_pct BOOLEAN NOT NULL DEFAULT FALSE")
+        c.execute("ALTER TABLE brv_descontos ADD COLUMN IF NOT EXISTS desconto_bradesco_pct BOOLEAN NOT NULL DEFAULT FALSE")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_brv_descontos_order ON brv_descontos (position_order)")
+
+        # price_procedures: "Guias Bradesco" passa a aceitar texto livre
+        # (numero, texto ou caracteres como *&(%$#@) em vez de so numerico.
+        if _table_exists(c, 'price_procedures'):
+            c.execute("""ALTER TABLE price_procedures
+                ALTER COLUMN value_bradesco TYPE TEXT USING value_bradesco::TEXT""")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS atendimentos_bradesco (
+                id TEXT PRIMARY KEY,
+                especialidades_liberadas TEXT NOT NULL,
+                guias TEXT DEFAULT '',
+                desconto_bradesco NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                desconto_bradesco_pct BOOLEAN NOT NULL DEFAULT FALSE,
+                valor_profissional NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                position_order INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_atendimentos_bradesco_order ON atendimentos_bradesco (position_order)")
+        _safe_add_column(c, 'atendimentos_bradesco', 'desconto_bradesco_pct',
+                         'desconto_bradesco_pct BOOLEAN NOT NULL DEFAULT FALSE')
+
+        c.execute("""
             CREATE TABLE IF NOT EXISTS calendar_events (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
