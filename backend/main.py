@@ -2342,6 +2342,9 @@ def get_comunicado(comm_id: str, user=Depends(get_current_user), db=Depends(get_
     # Increment views count
     db.execute("UPDATE communications SET views_count = views_count + 1 WHERE id=%s", (comm_id,))
     d["views_count"] = (d.get("views_count") or 0) + 1
+    d["readers_count"] = db.execute(
+        "SELECT COUNT(*) as cnt FROM communication_reads WHERE communication_id=%s", (comm_id,)
+    ).fetchone()["cnt"]
     db.commit()
     return d
 
@@ -6269,9 +6272,33 @@ def _extract_mentions(text: str):
 
 
 # ── GET notifications ─────────────────────────────────────────────────────────
+def _ensure_birthday_notifications(db):
+    """Avisa no sino, uma única vez por ano, quem faz aniversário hoje.
+    Roda sob demanda (ao consultar o sino), então não precisa de agendador."""
+    hoje = datetime.date.today()
+    rows = db.execute(
+        """SELECT key, name FROM users
+           WHERE SUBSTRING(birth_date, 6, 5) = %s AND COALESCE(desligado, 0) = 0""",
+        (hoje.strftime("%m-%d"),)
+    ).fetchall()
+    for r in rows:
+        ref = f"birthday:{r['key']}:{hoje.year}"
+        ja_existe = db.execute(
+            "SELECT 1 FROM notifications WHERE reference_id=%s", (ref,)
+        ).fetchone()
+        if ja_existe:
+            continue
+        _notify(db, title="🎂 Aniversário hoje!",
+                message=f"Hoje é aniversário de {r['name']}. Vamos celebrar!!! 🎉",
+                ntype="celebration", audience="all",
+                reference_id=ref, play_sound=True)
+    db.commit()
+
+
 @app.get("/api/notifications")
 def get_notifications(user=Depends(get_current_user), db=Depends(get_db)):
     _ensure_notifications_table(db)
+    _ensure_birthday_notifications(db)
     rows = db.execute(
         """SELECT n.*,
             u.initials AS actor_initials,
@@ -6292,6 +6319,7 @@ def get_notifications(user=Depends(get_current_user), db=Depends(get_db)):
 @app.get("/api/notifications/unread-count")
 def get_unread_count(user=Depends(get_current_user), db=Depends(get_db)):
     _ensure_notifications_table(db)
+    _ensure_birthday_notifications(db)
     row = db.execute(
         """SELECT COUNT(*) as cnt FROM notifications
         WHERE is_read = FALSE
