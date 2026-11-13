@@ -18,6 +18,7 @@ from deps import (security, get_current_user, get_current_user_from_token,
 from auth import create_token, verify_token, hash_password, check_password
 from rh_estrutura import router as rh_estrutura_router
 from disc import router as disc_router
+from estoque_ponte import router as estoque_ponte_router
 
 import cloudinary
 import cloudinary.uploader
@@ -225,6 +226,7 @@ app = FastAPI(title="Intranet Diálogos API", lifespan=lifespan)
 
 app.include_router(rh_estrutura_router)
 app.include_router(disc_router)
+app.include_router(estoque_ponte_router)
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS")
 if CORS_ORIGINS:
